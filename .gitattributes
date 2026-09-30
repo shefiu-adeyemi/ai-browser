@@ -1,0 +1,7 @@
+# Let git normalise line endings for text files (this project is edited on Windows).
+* text=auto
+
+# Never try to diff or convert these.
+*.ico binary
+*.png binary
+*.exe binary

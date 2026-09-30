@@ -1,0 +1,41 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+  body {
+    font-family: 'DM Sans', system-ui, sans-serif;
+    background: #F7F7F8;
+    color: #111;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #e5e5e5 transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #e5e5e5;
+    border-radius: 2px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #d0d0d0; }
+}

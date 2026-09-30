@@ -1,0 +1,22 @@
+# Runtime dependencies for AI Browser Agent.
+# Install:  pip install -r requirements.txt
+# Versions below are the ones this project is tested with; newer ones usually work, but the
+# pinned browser-use is exact because its internals (page API, judge, follow-up tasks) change
+# between releases.
+
+# The agent itself. It also brings in the AI SDKs (anthropic, openai, google-genai), httpx,
+# pydantic and python-dotenv, so those are deliberately not repeated here.
+browser-use==0.13.10
+
+# The web app.
+fastapi>=0.141
+# [standard] installs `websockets`, which the live browser view needs. Plain `uvicorn` starts
+# fine but every WebSocket connection then fails.
+uvicorn[standard]>=0.53
+
+# Imported directly (browser_cleanup.py); also a browser-use dependency.
+psutil>=7.0
+
+# Our code never imports this, but browser-use runs `playwright install chromium` the first time
+# if it can't find a Chromium. Without it a fresh machine has no browser for the agent.
+playwright>=1.48

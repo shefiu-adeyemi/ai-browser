@@ -1,0 +1,19 @@
+# Secrets and private data - never commit
+.env
+.env.*
+!.env.example
+browser_profile/
+.browser_profile/
+sessions/
+task_history.json
+.last_url
+*.log
+
+# Build output and dependencies
+build/
+dist/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+*.exe

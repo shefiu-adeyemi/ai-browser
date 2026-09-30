@@ -1,0 +1,52 @@
+# AI Browser Agent
+
+Give an AI a real browser and describe what you want in plain English. You watch it work in a live
+view, can click and type in that view yourself, and it asks before it does anything irreversible
+(sending, posting, buying, deleting).
+
+Built on [browser-use](https://github.com/browser-use/browser-use) with a FastAPI server and a React UI.
+
+## Setup
+
+1. **Python 3.12** and **Node.js 18+**.
+2. Install the Python packages: `pip install -r requirements.txt`
+   (the first run also downloads a Chromium for the agent if it can't find one).
+3. Build the web UI once: `cd frontend && npm install && npm run build`
+4. Start it: `python agent_ui.py` and open <http://localhost:8000>
+   (or use `launch.bat` / `AI Browser Agent.exe`, which start it without a console window).
+5. Open **Settings** in the app, choose a provider and paste its API key.
+
+Your keys and browser profiles are stored **outside this folder**, in
+`%LOCALAPPDATA%\AIBrowserAgent` (set `AIBA_DATA_DIR` to move it). Nothing secret lives in the
+project, so the folder can be zipped or committed safely. `.env.example` documents every option.
+
+## Safety
+
+- The agent only ever types your stored credentials into that site's own login form.
+- Sending, posting, connecting, buying, deleting, downloading and running JavaScript need your
+  approval. **Auto** mode (Settings) approves those only on the site your task names, declines the
+  rest, and logs every decision.
+- CAPTCHAs are never solved by the agent; it asks you to do them in the live view.
+- The agent's browser can't open this app's own page, so it can't approve its own requests.
+
+## Developing
+
+| | |
+|---|---|
+| Tests (fast, no browser) | `python -m unittest` |
+| Tests with a real Chromium (slow) | `RUN_BROWSER_TESTS=1 python -m unittest` |
+| Dev tools (PyInstaller, test client) | `pip install -r requirements-dev.txt` |
+| Build the launcher exe | `build_exe.bat` (not standalone: keep it beside `agent_ui.py`) |
+| Known issues / what was fixed | `ISSUES.md` |
+
+Main files: `agent_ui.py` (server), `action_guard.py` + `approvals.py` (safety),
+`run_outcome.py` (did it work?), `task_control.py` (start/stop/continue), `live_view.py`
+(browser screen), `chat_store.py` (saved chats), `env_store.py` + `providers.py` + `llm_config.py`
+(settings and AI models), `fake_llm.py` (a scripted stand-in for the AI, used by the tests).
+
+## Troubleshooting
+
+- **The exe says no Python has the packages:** run `pip install -r requirements.txt`, or set
+  `AIBA_PYTHON` to the Python that already has them.
+- **Live view stays blank:** reload the page (a restarted server issues a new session cookie).
+- **Port 8000 busy:** the launcher stops the previous instance; if something else uses the port, close it.
