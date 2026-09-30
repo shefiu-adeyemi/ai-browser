@@ -55,6 +55,31 @@ def _is_empty_dir(p: Path) -> bool:
     return p.is_dir() and not any(p.iterdir())
 
 
+def _move(src: Path, dst: Path) -> None:
+    """Move src to dst so that dst only ever appears COMPLETE. Same drive: an instant rename.
+    Different drive: copy to <dst>.partial, rename that into place, then delete the original, so an
+    interruption leaves the original intact plus a .partial folder that the next run discards."""
+    partial = dst.with_name(dst.name + ".partial")
+    if partial.is_dir():
+        shutil.rmtree(partial, ignore_errors=True)
+    elif partial.exists():
+        partial.unlink()
+    try:
+        os.rename(src, dst)
+        return
+    except OSError:
+        pass                                   # different drive (or locked): fall back to copying
+    if src.is_dir():
+        shutil.copytree(src, partial)
+    else:
+        shutil.copy2(src, partial)
+    os.replace(partial, dst)
+    try:
+        shutil.rmtree(src) if src.is_dir() else src.unlink()
+    except OSError as e:
+        log.warning("Copied %s to %s but could not remove the original (%s); delete it by hand.", src, dst, e)
+
+
 def migrate_legacy() -> list[str]:
     """Move private data out of the project folder. Never overwrites: if the
     destination already holds data the old copy is left alone and reported. An empty
@@ -70,7 +95,7 @@ def migrate_legacy() -> list[str]:
             log.warning("Not moving %s: %s already exists. Remove the old copy by hand.", src, dst)
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
+        _move(src, dst)
         moved.append(f"{src.name} -> {dst}")
         log.info("Moved %s to %s", src, dst)
     return moved

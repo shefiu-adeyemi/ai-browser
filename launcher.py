@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import Callable, Optional
@@ -26,6 +28,8 @@ from typing import Callable, Optional
 REQUIRED_MODULES = ("browser_use", "fastapi", "uvicorn", "psutil")
 PORT = 8000
 CREATE_NO_WINDOW = 0x08000000
+START_TIMEOUT = 90           # seconds to wait for the server to answer (first start imports a lot)
+LOG_LIMIT = 200_000          # bytes; a log bigger than this is moved to <name>.old before writing
 _CHECK = ("import importlib.util as u; "
           f"print(' '.join(m for m in {REQUIRED_MODULES!r} if u.find_spec(m) is None))")
 
@@ -37,12 +41,30 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def log(base: Path, message: str) -> None:
+def rotate(path: Path, limit: int = LOG_LIMIT) -> None:
+    """Keep one previous generation instead of growing forever (or wiping the evidence each start)."""
     try:
-        with open(base / "launcher.log", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now():%H:%M:%S}] {message}\n")
+        if path.exists() and path.stat().st_size > limit:
+            os.replace(path, path.with_name(path.name + ".old"))
     except OSError:
         pass
+
+
+def log(base: Path, message: str) -> None:
+    try:
+        path = base / "launcher.log"
+        rotate(path)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {message}" + chr(10))
+    except OSError:
+        pass
+
+
+def tail(path: Path, lines: int = 12) -> str:
+    try:
+        return chr(10).join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    except OSError:
+        return ""
 
 
 def message_box(text: str, title: str = "AI Browser Agent") -> None:
@@ -122,20 +144,79 @@ def explain_no_python(report: dict[str, Optional[list[str]]]) -> str:
 
 
 # ------------------------------------------------------------------ the old instance
-def stop_previous_server(base: Path) -> None:
-    """Stop whatever is listening on our port. /T also ends its child processes (the agent's
-    Chromium), which would otherwise be left running."""
+def listening_pid(port: int = PORT, run: Callable = subprocess.run) -> Optional[int]:
+    """The process listening on this port (from netstat), or None."""
     try:
-        result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=5)
-        for line in result.stdout.splitlines():
-            if f":{PORT} " in line and "LISTENING" in line:
-                pid = line.strip().split()[-1]
-                log(base, f"Killing PID {pid} on port {PORT}")
-                subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True)
-                time.sleep(1)
-                break
-    except Exception as e:
-        log(base, f"Port kill error: {e}")
+        out = run(["netstat", "-ano"], capture_output=True, text=True, timeout=5,
+                  creationflags=CREATE_NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].rsplit(":", 1)[-1] == str(port):
+            try:
+                return int(parts[-1])
+            except ValueError:
+                return None
+    return None
+
+
+def command_line(pid: int, run: Callable = subprocess.run) -> Optional[str]:
+    """What the process was started with, so we only ever stop our own server."""
+    try:
+        r = run(["powershell", "-NoProfile", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def stop_previous_server(base: Path, run: Callable = subprocess.run, sleep: Callable = time.sleep) -> Optional[str]:
+    """If an earlier copy of THIS app holds the port, stop it (with /T, so the agent's Chromium goes
+    too). Anything else holding the port is left alone: the return value is then a message for the
+    user, because killing an unrelated program (a dev server, a database) is not ours to do."""
+    pid = listening_pid(PORT, run)
+    if pid is None:
+        return None
+    cmd = command_line(pid, run)
+    if cmd is None or "agent_ui" not in cmd.lower():
+        log(base, f"Port {PORT} is held by PID {pid} ({cmd or 'unknown program'}); not ours, leaving it alone")
+        who = "an unidentified program" if cmd is None else "another program"
+        return (f"Port {PORT} is already in use by {who} (PID {pid}).\n\n"
+                "Close it (if it is an old copy of AI Browser Agent, end it in Task Manager) "
+                "and start AI Browser Agent again.")
+    log(base, f"Stopping the previous AI Browser Agent (PID {pid})")
+    run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, creationflags=CREATE_NO_WINDOW)
+    for _ in range(10):                      # wait until the port is actually free
+        sleep(0.5)
+        if listening_pid(PORT, run) is None:
+            return None
+    return f"The previous AI Browser Agent (PID {pid}) did not stop. End it in Task Manager and try again."
+
+
+def _answers(url: str) -> bool:
+    try:
+        urllib.request.urlopen(url, timeout=2).close()
+        return True
+    except urllib.error.HTTPError:
+        return True                          # any HTTP answer means the server is up
+    except (OSError, ValueError):
+        return False
+
+
+def wait_until_up(proc, timeout: float = START_TIMEOUT, probe: Callable = _answers,
+                  sleep: Callable = time.sleep, clock: Callable = time.monotonic) -> str:
+    """'up', 'exited' (the server process died) or 'timeout'."""
+    deadline = clock() + timeout
+    while True:
+        if proc.poll() is not None:
+            return "exited"
+        if probe(f"http://127.0.0.1:{PORT}/"):
+            return "up"
+        if clock() >= deadline:
+            return "timeout"
+        sleep(0.5)
 
 
 # ------------------------------------------------------------------------------ main
@@ -158,20 +239,32 @@ def main() -> int:
         return 1
     log(base, f"Python: {python}")
 
-    stop_previous_server(base)
+    blocked = stop_previous_server(base)
+    if blocked:
+        message_box(blocked)
+        return 1
 
-    err_log = open(base / "agent_error.log", "w", encoding="utf-8")
+    err_path = base / "agent_error.log"
+    rotate(err_path)
     try:
-        proc = subprocess.Popen([python, str(script)], cwd=str(base), creationflags=CREATE_NO_WINDOW,
-                                stderr=err_log, stdout=subprocess.DEVNULL)
+        with open(err_path, "a", encoding="utf-8") as err_log:     # closed here; the child has its own handle
+            err_log.write(f"{chr(10)}=== start {datetime.datetime.now():%Y-%m-%d %H:%M:%S} ==={chr(10)}")
+            err_log.flush()
+            proc = subprocess.Popen([python, str(script)], cwd=str(base), creationflags=CREATE_NO_WINDOW,
+                                    stderr=err_log, stdout=subprocess.DEVNULL)
         log(base, f"Server started, PID={proc.pid}")
     except Exception as e:
         log(base, f"Launch error: {e}")
-        message_box(f"Could not start the app:\n{e}")
+        message_box(f"Could not start the app:{chr(10)}{e}")
         return 1
 
-    time.sleep(4)
-    webbrowser.open(f"http://localhost:{PORT}")
+    state = wait_until_up(proc)
+    log(base, f"Server state: {state}")
+    if state == "exited":
+        message_box("The app stopped right after starting." + chr(10) + chr(10) + (tail(err_path) or "(no error output)")
+                    + chr(10) + chr(10) + f"Full log: {err_path}")
+        return 1
+    webbrowser.open(f"http://localhost:{PORT}")     # on 'timeout' still open it: the page retries on its own
     log(base, "Browser opened.")
     return 0
 

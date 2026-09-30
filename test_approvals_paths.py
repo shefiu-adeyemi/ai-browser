@@ -141,6 +141,38 @@ class Migration(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def test_other_drive_move_never_shows_a_partial_destination(self):
+        seen = []
+        real_replace = app_paths.os.replace
+
+        def spy(a, b):
+            seen.append(Path(b).exists())             # destination must not exist before the final rename
+            return real_replace(a, b)
+        with mock.patch.object(app_paths.os, "rename", side_effect=OSError("cross-device")), \
+                mock.patch.object(app_paths.os, "replace", spy):
+            app_paths.migrate_legacy()
+        self.assertEqual((self.data / ".env").read_text(), "ANTHROPIC_API_KEY=sk-secret\n")
+        self.assertEqual((self.data / "profiles" / "ui" / "Cookies").read_text(), "cookie")
+        self.assertFalse((self.old / ".env").exists())
+        self.assertFalse((self.old / ".browser_profile").exists())
+        self.assertFalse(any(seen))
+        self.assertEqual([p.name for p in self.data.rglob("*.partial")], [])
+
+    def test_an_interrupted_copy_leaves_the_original_and_is_retried(self):
+        (self.data / "profiles").mkdir(parents=True)
+        (self.data / "profiles" / "ui.partial").mkdir()              # debris from an earlier crash
+        (self.data / "profiles" / "ui.partial" / "junk").write_text("x")
+        with mock.patch.object(app_paths.os, "rename", side_effect=OSError("cross-device")), \
+                mock.patch.object(app_paths.shutil, "copytree", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                app_paths.migrate_legacy()
+        self.assertTrue((self.old / ".browser_profile" / "Cookies").exists())   # original untouched
+        self.assertFalse((self.data / "profiles" / "ui").exists())
+        with mock.patch.object(app_paths.os, "rename", side_effect=OSError("cross-device")):
+            app_paths.migrate_legacy()                                # retry succeeds, debris discarded
+        self.assertEqual((self.data / "profiles" / "ui" / "Cookies").read_text(), "cookie")
+        self.assertFalse((self.data / "profiles" / "ui" / "junk").exists())
+
     def test_moves_not_copies(self):
         moved = app_paths.migrate_legacy()
         self.assertEqual(len(moved), 3)

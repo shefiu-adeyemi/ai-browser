@@ -99,8 +99,8 @@ class Main(unittest.TestCase):
         self.box = mock.Mock()
         for p in (mock.patch.object(launcher, "app_dir", return_value=self.base),
                   mock.patch.object(launcher, "message_box", self.box),
-                  mock.patch.object(launcher, "stop_previous_server"),
-                  mock.patch.object(launcher.time, "sleep"),
+                  mock.patch.object(launcher, "stop_previous_server", return_value=None),
+                  mock.patch.object(launcher, "wait_until_up", return_value="up"),
                   mock.patch.object(launcher.webbrowser, "open")):
             p.start()
             self.addCleanup(p.stop)
@@ -120,7 +120,7 @@ class Main(unittest.TestCase):
     def test_starts_the_app_with_the_chosen_python_in_the_project_folder(self):
         (self.base / "agent_ui.py").write_text("")
         with mock.patch.object(launcher, "pick_python", return_value=("C:\\good\\python.exe", {})), \
-                mock.patch.object(launcher.subprocess, "Popen", return_value=SimpleNamespace(pid=4242)) as popen:
+                mock.patch.object(launcher.subprocess, "Popen", return_value=SimpleNamespace(pid=4242, poll=lambda: None)) as popen:
             self.assertEqual(launcher.main(), 0)
         args, kwargs = popen.call_args
         self.assertEqual(args[0], ["C:\\good\\python.exe", str(self.base / "agent_ui.py")])
@@ -136,6 +136,133 @@ class Main(unittest.TestCase):
             self.assertEqual(launcher.main(), 1)
         self.assertIn("access denied", self.box.call_args[0][0])
         launcher.webbrowser.open.assert_not_called()
+
+
+    def test_a_foreign_process_on_the_port_stops_the_launch(self):
+        (self.base / "agent_ui.py").write_text("")
+        with mock.patch.object(launcher, "pick_python", return_value=("p", {})), \
+                mock.patch.object(launcher, "stop_previous_server", return_value="Port 8000 is in use"), \
+                mock.patch.object(launcher.subprocess, "Popen") as popen:
+            self.assertEqual(launcher.main(), 1)
+        popen.assert_not_called()
+        self.assertIn("in use", self.box.call_args[0][0])
+
+    def test_a_server_that_dies_at_once_shows_its_error_output(self):
+        (self.base / "agent_ui.py").write_text("")
+
+        def start(*a, **k):
+            k["stderr"].write("ImportError: no module named x" + chr(10))
+            return SimpleNamespace(pid=1, poll=lambda: 1)
+        with mock.patch.object(launcher, "pick_python", return_value=("p", {})), \
+                mock.patch.object(launcher.subprocess, "Popen", side_effect=start), \
+                mock.patch.object(launcher, "wait_until_up", return_value="exited"):
+            self.assertEqual(launcher.main(), 1)
+        self.assertIn("ImportError: no module named x", self.box.call_args[0][0])
+        launcher.webbrowser.open.assert_not_called()
+
+    def test_the_error_log_is_appended_to_not_wiped(self):
+        (self.base / "agent_ui.py").write_text("")
+        (self.base / "agent_error.log").write_text("earlier crash" + chr(10), encoding="utf-8")
+        with mock.patch.object(launcher, "pick_python", return_value=("p", {})), \
+                mock.patch.object(launcher.subprocess, "Popen", return_value=SimpleNamespace(pid=1, poll=lambda: None)):
+            launcher.main()
+        self.assertIn("earlier crash", (self.base / "agent_error.log").read_text(encoding="utf-8"))
+
+
+NETSTAT = """
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       4
+  TCP    0.0.0.0:8000           0.0.0.0:0              LISTENING       1234
+  TCP    127.0.0.1:18000        0.0.0.0:0              LISTENING       77
+  TCP    127.0.0.1:8000         127.0.0.1:5000         ESTABLISHED     999
+"""
+
+
+class OldInstance(unittest.TestCase):
+    def setUp(self):
+        self.base = pathlib.Path(tempfile.mkdtemp())
+
+    def test_finds_only_the_exact_listening_port(self):
+        self.assertEqual(launcher.listening_pid(8000, run=lambda *a, **k: result(NETSTAT)), 1234)
+        self.assertIsNone(launcher.listening_pid(800, run=lambda *a, **k: result(NETSTAT)))
+        self.assertIsNone(launcher.listening_pid(8000, run=mock.Mock(side_effect=OSError)))
+
+    def fake(self, cmdline, freed=True):
+        calls = []
+        state = {"killed": False}
+
+        def run(args, **k):
+            calls.append(args[0])
+            if args[0] == "netstat":
+                return result("" if state["killed"] and freed else NETSTAT)
+            if args[0] == "powershell":
+                return result(cmdline or "", 0 if cmdline else 1)
+            state["killed"] = True
+            return result()
+        return run, calls
+
+    def test_our_own_old_server_is_stopped(self):
+        run, calls = self.fake('"C:\\Py\\python.exe" "C:\\app\\agent_ui.py"')
+        self.assertIsNone(launcher.stop_previous_server(self.base, run=run, sleep=lambda s: None))
+        self.assertIn("taskkill", calls)
+
+    def test_someone_elses_program_is_never_killed(self):
+        for cmd in ('"C:\\node.exe" server.js', None):            # other program / cannot tell
+            run, calls = self.fake(cmd)
+            msg = launcher.stop_previous_server(self.base, run=run, sleep=lambda s: None)
+            self.assertIn("already in use", msg)
+            self.assertNotIn("taskkill", calls)
+
+    def test_reports_when_the_old_one_will_not_die(self):
+        run, calls = self.fake("python agent_ui.py", freed=False)
+        self.assertIn("did not stop", launcher.stop_previous_server(self.base, run=run, sleep=lambda s: None))
+
+    def test_a_free_port_needs_nothing(self):
+        self.assertIsNone(launcher.stop_previous_server(self.base, run=lambda *a, **k: result(""), sleep=lambda s: None))
+
+
+class Waiting(unittest.TestCase):
+    def wait(self, answers, alive=True, timeout=5):
+        t = {"now": 0.0}
+        it = iter(answers)
+        proc = SimpleNamespace(poll=lambda: None if alive else 1)
+        return launcher.wait_until_up(proc, timeout=timeout, probe=lambda url: next(it, False),
+                                      sleep=lambda s: t.__setitem__("now", t["now"] + s), clock=lambda: t["now"])
+
+    def test_up_as_soon_as_it_answers(self):
+        self.assertEqual(self.wait([False, False, True]), "up")
+
+    def test_gives_up_after_the_timeout(self):
+        self.assertEqual(self.wait([]), "timeout")
+
+    def test_a_dead_server_is_reported_immediately(self):
+        self.assertEqual(self.wait([], alive=False), "exited")
+
+    def test_any_http_answer_counts_as_up(self):
+        import urllib.error
+        with mock.patch.object(launcher.urllib.request, "urlopen",
+                               side_effect=urllib.error.HTTPError("u", 503, "x", {}, None)):
+            self.assertTrue(launcher._answers("http://127.0.0.1:1/"))
+        with mock.patch.object(launcher.urllib.request, "urlopen", side_effect=ConnectionRefusedError):
+            self.assertFalse(launcher._answers("http://127.0.0.1:1/"))
+
+
+class Logs(unittest.TestCase):
+    def test_a_big_log_is_rotated_once(self):
+        base = pathlib.Path(tempfile.mkdtemp())
+        (base / "launcher.log").write_text("x" * (launcher.LOG_LIMIT + 1))
+        launcher.log(base, "fresh")
+        self.assertTrue((base / "launcher.log.old").exists())
+        self.assertIn("fresh", (base / "launcher.log").read_text(encoding="utf-8"))
+        self.assertLess((base / "launcher.log").stat().st_size, 1000)
+
+    def test_the_other_launchers_just_call_launcher_py(self):
+        for name in ("launch.bat", "launch_silent.vbs"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("launcher.py", text)
+            self.assertNotIn("agent_ui.py", text.replace("All the logic", ""))
+            self.assertNotIn("taskkill", text)
+            self.assertNotIn("||", text)        # "a || b" would run the launcher twice when it fails
 
 
 class ThisMachine(unittest.TestCase):

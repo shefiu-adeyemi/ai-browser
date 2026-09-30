@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 _POLL_S        = 0.4     # how often we re-check focus / clients / URL
 _MIN_FRAME_GAP = 0.033   # cap forwarding at ~30 fps
 _MAX_QUEUED_INPUT = 256
+_MAX_INSERT = 10_000          # longest paste forwarded in one go
 _BUTTON_BITS   = {"left": 1, "right": 2, "middle": 4}
 _CTRL, _META   = 2, 4    # CDP modifier bits
 _EDIT_COMMANDS = {"a": "selectAll", "c": "copy", "x": "cut",
@@ -134,6 +135,11 @@ class LiveView:
         if not getattr(session, "agent_focus_target_id", None):
             return None
         return await session.get_or_create_cdp_session(focus=False)
+
+    @property
+    def current_url(self) -> str:
+        """The last page address published, for a client that connects later."""
+        return self._last_url
 
     async def _publish_url(self, session: Any) -> None:
         try:
@@ -257,6 +263,12 @@ class LiveView:
             if text and not mods & (_CTRL | _META):   # Ctrl+A etc. are shortcuts, not text
                 await send(params={"type": "char", "text": text, "modifiers": mods},
                            session_id=self._sid)
+        elif event == "insertText":
+            # Paste / IME / emoji: the UI sends the finished text, typed in one step. (Ctrl+V can't
+            # use the page's clipboard: this browser's clipboard is not the user's.)
+            text = str(msg.get("text", ""))[:_MAX_INSERT]
+            if text:
+                await self._client.send.Input.insertText(params={"text": text}, session_id=self._sid)
         elif event == "keyUp":
             await send(params={"type": "keyUp", "key": key,
                                "code": str(msg.get("code", ""))[:32],

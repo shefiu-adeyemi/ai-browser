@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import providers
+import secret_box
 
 _LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -73,11 +74,31 @@ def parse(text: str) -> dict[str, str]:
     return out
 
 
+# Stored encrypted (Windows DPAPI, see secret_box.py). The email and the other settings are not secret.
+SECRET_KEYS = tuple(p.key_env for p in providers.PROVIDERS) + ("LINKEDIN_PASSWORD",)
+
+
 def read(path: Path) -> dict[str, str]:
+    """The settings with secrets decrypted (values that were never encrypted are returned as they are)."""
     path = Path(path)
     if not path.exists():
         return {}
-    return parse(path.read_text(encoding="utf-8-sig"))
+    values = parse(path.read_text(encoding="utf-8-sig"))
+    return {k: secret_box.unprotect(v) if k in SECRET_KEYS else v for k, v in values.items()}
+
+
+def unreadable_secrets(path: Path) -> list[str]:
+    """Secrets present in the file that this Windows account cannot decrypt (the file was copied
+    from another computer or user). They read as 'not set', so the UI must say so."""
+    path = Path(path)
+    if not path.exists():
+        return []
+    raw = parse(path.read_text(encoding="utf-8-sig"))
+    return [k for k in SECRET_KEYS if raw.get(k, "").startswith(secret_box.PREFIX) and not secret_box.unprotect(raw[k])]
+
+
+def _stored(key: str, value: str) -> str:
+    return secret_box.protect(value) if key in SECRET_KEYS else value
 
 
 # ------------------------------------------------------------------------------ writing
@@ -103,12 +124,12 @@ def write(path: Path, updates: dict[str, Optional[str]]) -> None:
             seen.add(key)
             if updates[key]:
                 eol = "\r\n" if line.endswith("\r\n") else "\n"
-                out.append(f"{key}={encode_value(updates[key])}{eol}")
+                out.append(f"{key}={encode_value(_stored(key, updates[key]))}{eol}")
             continue
         out.append(line if line.endswith(("\n", "\r")) else line + "\n")
     for key, value in updates.items():
         if key not in seen and value:
-            out.append(f"{key}={encode_value(value)}\n")
+            out.append(f"{key}={encode_value(_stored(key, value))}\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
     try:
@@ -127,11 +148,25 @@ def apply_to_environ(path: Path) -> list[str]:
     """Make the settings file win over stale shell variables: every non-empty value in the file
     replaces the process environment's value for that key. Returns the keys applied."""
     applied = []
+    _encrypt_plaintext_secrets(path)
     for key, value in read(path).items():
         if value:
             os.environ[key] = value
             applied.append(key)
     return applied
+
+
+def _encrypt_plaintext_secrets(path: Path) -> None:
+    """Older files (or hand edits) hold secrets as plain text: encrypt them now, once."""
+    if not secret_box.available() or not Path(path).exists():
+        return
+    try:
+        raw = parse(Path(path).read_text(encoding="utf-8-sig"))
+        plain = {k: v for k, v in raw.items() if k in SECRET_KEYS and v and not v.startswith(secret_box.PREFIX)}
+        if plain:
+            write(path, plain)
+    except OSError:
+        pass                                   # read-only location: keep working with plain text
 
 
 def forget(keys: Iterable[str]) -> None:

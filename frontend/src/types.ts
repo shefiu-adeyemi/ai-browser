@@ -51,6 +51,7 @@ export interface Settings {
   MAX_STEPS: number
   CONTEXT_TURNS: number
   APPROVAL_MODE: string   // 'ask' | 'auto' (the server also allows 'off', hand-edited only)
+  UNREADABLE?: string[]   // read-only: stored secrets this Windows account cannot decrypt
   PROVIDERS: ProviderInfo[]   // read-only: sent by the server, never saved back
 }
 
@@ -70,7 +71,7 @@ export interface ApprovalRequest {
 export type WsMessage =
   | { type: 'screenshot'; data: string; w?: number; h?: number }
   | { type: 'url'; data: string }
-  | { type: 'action'; text: string }
+  | { type: 'action'; text: string; step?: number }
   | { type: 'result'; text: string; verdict: Verdict; reason?: string; retries: number; duration: number }
   | { type: 'verdict'; verdict: Verdict; retry: number; reason: string }
   | { type: 'status'; text: Status; max_steps?: number }
@@ -81,4 +82,4 @@ export type WsMessage =
 // Input events sent from frontend → backend → CDP
 export type InputMessage =
   | { type: 'input'; kind: 'mouse'; event: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel'; x: number; y: number; button?: string; clickCount?: number; deltaX?: number; deltaY?: number; modifiers?: number }
-  | { type: 'input'; kind: 'key'; event: 'keyDown' | 'keyUp' | 'char'; key: string; code: string; text?: string; keyCode?: number; modifiers?: number }
+  | { type: 'input'; kind: 'key'; event: 'keyDown' | 'keyUp' | 'char' | 'insertText'; key?: string; code?: string; text?: string; keyCode?: number; modifiers?: number }

@@ -1,16 +1,6 @@
 @echo off
-title AI Browser Agent
+rem Thin wrapper: all the logic (finding Python, stopping our old copy, waiting for the server,
+rem opening the browser) lives in launcher.py so every way of starting the app behaves the same.
 cd /d "%~dp0"
-
-:: Kill any previous instance holding port 8000
-for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    taskkill /F /T /PID %%a >nul 2>&1
-)
-timeout /t 1 /nobreak >nul
-
-echo Starting AI Browser Agent...
-echo Open http://localhost:8000 in your browser
-echo.
-start /b "" python agent_ui.py
-timeout /t 4 /nobreak >nul
-start "" "http://localhost:8000"
+where py >nul 2>&1
+if errorlevel 1 (python launcher.py) else (py -3 launcher.py)

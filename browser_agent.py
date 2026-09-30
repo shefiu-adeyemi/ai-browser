@@ -17,20 +17,14 @@ from browser_use.browser.session import BrowserSession
 from llm_config import get_llm
 
 
-# Note: LinkedIn tasks below have no login handling — use linkedin_agent.py for
-# LinkedIn work that requires authentication.
+# General browsing only. LinkedIn needs a login and has its own menu: use linkedin_agent.py.
 TASKS = {
-    "search_jobs": (
-        "Go to https://www.linkedin.com/jobs/ and search for Python developer jobs "
-        "in Lagos, Nigeria. Return the titles and companies of the first 5 results."
+    "wikipedia": (
+        "Open https://en.wikipedia.org/wiki/Web_browser and summarise the first section "
+        "in three sentences."
     ),
-    "view_profiles": (
-        "Go to https://www.linkedin.com/ and search for people with the title "
-        "AI Engineer in Nigeria. Return the name and headline of the first 3 profiles."
-    ),
-    "research_company": (
-        "Go to https://www.linkedin.com/company/openai/ and extract: "
-        "the company description, number of employees, and the 3 most recent posts."
+    "hacker_news": (
+        "Open https://news.ycombinator.com/ and return the titles of the top 5 stories."
     ),
     "general": (
         "Open https://google.com, search for latest AI news 2026, "

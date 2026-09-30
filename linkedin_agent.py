@@ -1,6 +1,11 @@
 """
 LinkedIn AI Agent — persistent login session + menu of tasks.
-Saves your browser session in ./browser_profile/ so you only log in once.
+Saves your browser session in its own profile folder (%LOCALAPPDATA%\\AIBrowserAgent\\profiles\\linkedin)
+so you only log in once. The web UI keeps a separate profile; the two can't share one because
+Chromium locks a profile to a single running browser.
+
+Posting and sending are never automatic: every such click goes through the approval guard
+(action_guard.py), and "draft a post" stops before the Post button.
 
 Usage:
   python linkedin_agent.py
@@ -20,6 +25,9 @@ from site_credentials import linkedin_sensitive_data, linkedin_login_instruction
 
 PROFILE_DIR = app_paths.LINKEDIN_PROFILE_DIR
 
+
+# Only real member profiles: the old check accepted any linkedin.com path (feed, settings, messaging...).
+PROFILE_URL = re.compile(r"https://www\.linkedin\.com/in/[A-Za-z0-9][A-Za-z0-9\-_%.]*/?")
 
 login_prefix = linkedin_login_instructions
 build_sensitive_data = linkedin_sensitive_data
@@ -47,10 +55,11 @@ def task_search_people(title: str, location: str) -> str:
 
 
 def task_send_connection(profile_url: str, note: str) -> str:
-    if not profile_url.startswith("https://www.linkedin.com/"):
+    if not PROFILE_URL.fullmatch(profile_url.strip()):
         raise ValueError(
-            f"URL must start with https://www.linkedin.com/ — got: '{profile_url}'"
+            f"URL must be a profile like https://www.linkedin.com/in/<name>/ — got: '{profile_url}'"
         )
+    profile_url = profile_url.strip()
     return (
         f"{login_prefix()}"
         f"Go to {profile_url}. "

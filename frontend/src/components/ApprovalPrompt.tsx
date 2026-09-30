@@ -5,6 +5,8 @@ interface Props {
   request: ApprovalRequest
   /** Resolves true once the server has the answer; false if it couldn't be delivered. */
   onAnswer: (id: string, allow: boolean) => Promise<boolean>
+  /** The agent step that asked, so the prompt can be matched to the log. */
+  step?: number
 }
 
 /**
@@ -12,7 +14,7 @@ interface Props {
  * "handoff" = the user does something in the browser pane (e.g. a CAPTCHA) and continues.
  * No answer in `timeout` seconds counts as a denial on the server, so we count down here.
  */
-export default function ApprovalPrompt({ request, onAnswer }: Props) {
+export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
   const [left, setLeft] = useState(request.timeout)
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -36,13 +38,19 @@ export default function ApprovalPrompt({ request, onAnswer }: Props) {
     }
   }
   return (
+    // An approval is modal (dimmed, centred). A hand-off ("solve this CAPTCHA") is not: the user must
+    // be able to click in the browser pane, so the page stays clickable and the card sits at the bottom.
+    <div className={handoff
+      ? 'pointer-events-none fixed inset-0 z-50 flex items-end justify-center p-4'
+      : 'fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4'}>
     <div
       role="alertdialog"
+      aria-modal={!handoff}
       aria-labelledby="approval-title"
-      className="fixed left-1/2 top-4 z-50 w-[520px] max-w-[92vw] -translate-x-1/2 rounded-xl border border-amber-300 bg-amber-50 p-4 shadow-xl"
+      className="pointer-events-auto w-[520px] max-w-full rounded-xl border border-amber-300 bg-amber-50 p-4 shadow-xl"
     >
       <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
-        {handoff ? 'Agent needs your help' : 'Approval needed'} · {left}s
+        {handoff ? 'Agent needs your help' : 'Approval needed'}{step ? ` · step ${step}` : ''} · {left}s
       </p>
       <p id="approval-title" className="mt-1 text-sm font-semibold text-gray-900 break-words">
         {request.title}
@@ -75,6 +83,7 @@ export default function ApprovalPrompt({ request, onAnswer }: Props) {
           {handoff ? "I'm done — continue" : 'Approve'}
         </button>
       </div>
+    </div>
     </div>
   )
 }

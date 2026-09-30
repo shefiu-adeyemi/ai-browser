@@ -167,15 +167,42 @@ export default function BrowserPane({
     send({ type: 'input', kind: 'mouse', event: 'mouseWheel', x, y, button: 'none', clickCount: 0, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: getModifiers(e) })
   }, [send, toNative])
 
-  const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLCanvasElement>) => {
+  // Text that does not come from a plain key press (an emoji picker, an IME such as Chinese/Japanese,
+  // dictation, a phone keyboard) raises no usable key events on a canvas. A hidden text box takes the
+  // focus instead; whatever it receives is sent as finished text.
+  const textRef = useRef<HTMLTextAreaElement>(null)
+  const sendText = useCallback((text: string) => {
+    if (text) send({ type: 'input', kind: 'key', event: 'insertText', text })
+  }, [send])
+  const onTextInput = useCallback((e: React.FormEvent<HTMLTextAreaElement>) => {
+    if ((e.nativeEvent as InputEvent).isComposing) return   // wait for compositionend
+    sendText(e.currentTarget.value)
+    e.currentTarget.value = ''
+  }, [sendText])
+  const onCompositionEnd = useCallback((e: React.CompositionEvent<HTMLTextAreaElement>) => {
+    sendText(e.data)
+    e.currentTarget.value = ''
+  }, [sendText])
+
+  const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // An IME is composing: let the text box have it, it is sent when the composition ends.
+    if (e.nativeEvent.isComposing || e.key === 'Process' || e.key === 'Unidentified') return
+    // Ctrl/Cmd+V: let the browser fire its paste event (handled below) instead of swallowing the key.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return
     e.preventDefault()
     send({ type: 'input', kind: 'key', event: 'keyDown', key: e.key, code: e.code, text: '', keyCode: e.keyCode, modifiers: getModifiers(e) })
-    if (e.key.length === 1) {
+    if ([...e.key].length === 1) {   // one character, including emoji (which are 2 UTF-16 units)
       send({ type: 'input', kind: 'key', event: 'char', key: e.key, code: e.code, text: e.key, keyCode: e.keyCode, modifiers: getModifiers(e) })
     }
   }, [send])
 
-  const onKeyUp = useCallback((e: React.KeyboardEvent<HTMLCanvasElement>) => {
+  const onPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    e.preventDefault()
+    const text = e.clipboardData.getData('text')
+    if (text) send({ type: 'input', kind: 'key', event: 'insertText', text })
+  }, [send])
+
+  const onKeyUp = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     e.preventDefault()
     send({ type: 'input', kind: 'key', event: 'keyUp', key: e.key, code: e.code, text: '', keyCode: e.keyCode, modifiers: getModifiers(e) })
   }, [send])
@@ -215,7 +242,7 @@ export default function BrowserPane({
             <path d="M2.5 4V3a2 2 0 0 1 4 0v1" stroke="currentColor" strokeWidth="1.2"/>
           </svg>
           <span className="text-[11px] text-gray-600 truncate min-w-0">
-            {currentUrl || 'google.com'}
+            {currentUrl || 'Waiting for the browser…'}
           </span>
         </div>
       </div>
@@ -235,9 +262,23 @@ export default function BrowserPane({
             onMouseUp={onMouseUp}
             onMouseMove={onMouseMove}
             onWheel={onWheel}
-            onKeyDown={onKeyDown}
-            onKeyUp={onKeyUp}
+            onFocus={() => textRef.current?.focus()}
           />
+        <textarea
+          ref={textRef}
+          aria-label="Type into the browser"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          tabIndex={-1}
+          className="absolute h-px w-px opacity-0 pointer-events-none"
+          style={{ left: 0, top: 0 }}
+          onKeyDown={onKeyDown}
+          onKeyUp={onKeyUp}
+          onPaste={onPaste}
+          onInput={onTextInput}
+          onCompositionEnd={onCompositionEnd}
+        />
         {!hasScreenshot && <IdleIllustration />}
 
         {/* Running pulse overlay on screenshot */}

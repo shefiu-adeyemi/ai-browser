@@ -12,7 +12,8 @@ class FakeClient:
         self.calls = []
         rec = lambda name: (lambda params=None, session_id=None: self._rec(name, params, session_id))
         self.send = SimpleNamespace(
-            Input=SimpleNamespace(dispatchMouseEvent=rec("mouse"), dispatchKeyEvent=rec("key")),
+            Input=SimpleNamespace(dispatchMouseEvent=rec("mouse"), dispatchKeyEvent=rec("key"),
+                                  insertText=rec("insert")),
             Page=SimpleNamespace(screencastFrameAck=rec("ack")),
         )
 
@@ -63,6 +64,23 @@ class InputMapping(unittest.IsolatedAsyncioTestCase):
         lv = make()
         await lv.dispatch_input({"kind": "key", "event": "char", "key": "q", "text": "q"})
         self.assertEqual(calls(lv, "key")[0], {"type": "char", "text": "q", "modifiers": 0})
+
+    async def test_a_late_client_can_be_told_the_current_url(self):
+        lv = make()
+        self.assertEqual(lv.current_url, "")
+        session = SimpleNamespace(get_current_page_url=lambda: asyncio.sleep(0, "http://localhost:8765/"))
+        await lv._publish_url(session)
+        self.assertEqual(lv.current_url, "http://localhost:8765/")
+
+    async def test_paste_is_inserted_as_text_and_capped(self):
+        lv = make()
+        await lv.dispatch_input({"kind": "key", "event": "insertText", "text": "héllo 😀"})
+        await lv.dispatch_input({"kind": "key", "event": "insertText", "text": ""})
+        await lv.dispatch_input({"kind": "key", "event": "insertText", "text": "x" * 50_000})
+        got = calls(lv, "insert")
+        self.assertEqual(got[0], {"text": "héllo 😀"})
+        self.assertEqual(len(got), 2)                            # empty paste sends nothing
+        self.assertEqual(len(got[1]["text"]), 10_000)
 
     async def test_garbage_never_raises_or_sends(self):
         lv = make()

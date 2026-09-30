@@ -18,7 +18,7 @@ export default function App() {
   const [maxSteps, setMaxSteps] = useState<number | undefined>(undefined)
   const [lastDuration, setLastDuration] = useState<number | undefined>(undefined)
   const [currentAction, setCurrentAction] = useState<string | undefined>(undefined)
-  const [currentUrl, setCurrentUrl] = useState<string>('google.com')
+  const [currentUrl, setCurrentUrl] = useState<string>('')
 
   const wsRef = useRef<WebSocket | null>(null)
   const pendingTurnIdRef = useRef<string | null>(null)
@@ -96,7 +96,8 @@ export default function App() {
               setCurrentAction(undefined)
             }
           } else if (msg.type === 'action') {
-            stepCountRef.current += 1
+            // The server tags real step lines ("Step 3"); other lines don't advance the counter.
+            if (typeof msg.step === 'number') stepCountRef.current = msg.step
             setCurrentAction(msg.text)
             // Read the refs NOW. The updater below runs later (after this handler has finished and
             // possibly cleared them), so reading them inside it would attach logs to nothing.
@@ -346,7 +347,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-gray-100">
-      {approval && <ApprovalPrompt request={approval} onAnswer={answerApproval} />}
+      {approval && <ApprovalPrompt request={approval} onAnswer={answerApproval} step={stepCountRef.current} />}
       {/* Left: browser pane */}
       <div className="flex-1 min-w-0 overflow-hidden">
         <BrowserPane

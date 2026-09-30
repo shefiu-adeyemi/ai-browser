@@ -350,6 +350,7 @@ interface SaveResult {
 
 async function saveSettings(s: SettingsType): Promise<SaveResult> {
   const body: Partial<SettingsType> = { ...s }
+  delete body.UNREADABLE
   delete body.PROVIDERS   // the provider table only flows server -> UI
   try {
     const res = await fetch('/settings', {
@@ -526,6 +527,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
     setSaving(false)
     if (result.ok) {
       setErrors({})
+      loadSettings().then((fresh) => fresh && setSettings(fresh))   // masks, and clears warnings that no longer apply
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } else {
@@ -695,6 +697,12 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
 
       {/* Footer */}
       <div className="px-5 py-4 border-t border-gray-100 flex-shrink-0">
+        {(settings.UNREADABLE?.length ?? 0) > 0 && (
+          <div role="status" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] leading-snug text-amber-800">
+            Saved {settings.UNREADABLE!.map((k) => SETTING_NAMES[k] ?? k).join(', ')} can't be read by this Windows
+            account (the settings file came from another computer or user). Enter it again and save.
+          </div>
+        )}
         {Object.keys(errors).length > 0 && (
           <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] leading-snug text-red-700">
             <p className="font-semibold">Not saved. Please fix:</p>
