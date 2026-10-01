@@ -33,8 +33,8 @@ addresses with a username or password in them are refused. Text that isn't an ad
 Google; set `AIBA_SEARCH_URL` (for example `https://duckduckgo.com/?q=`) to use another engine. Google can
 show a CAPTCHA to automated browsers, which is the usual reason to switch.
 
-The page is drawn at 110% so text and elements are easier to read (set `AIBA_PAGE_ZOOM`, from 1.0 to 2.0, to change it; the
-agent sees the same slightly smaller window). Two buttons in the toolbar shape the view: **Fill** enlarges the
+Pages are drawn at normal size. To make text and elements larger set `AIBA_PAGE_ZOOM` (1.0 to 2.0; 1.1 is 110%, like
+browser zoom); the agent then sees the same proportionally smaller window. Two buttons in the toolbar shape the view: **Fill** enlarges the
 view up to 15% more so the grey bands shrink (cropping a little at the bottom and sides, never the top) and
 **Fit** shows the whole page. The chat panel can be resized (drag the
 divider), widened, or hidden to a slim rail; your choices are remembered.

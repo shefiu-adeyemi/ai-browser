@@ -114,8 +114,10 @@ class Shell(unittest.IsolatedAsyncioTestCase):
         from unittest import mock
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AIBA_PAGE_ZOOM", None)
-            self.assertEqual(agent_ui._page_viewport(), {"width": 1745, "height": 982})        # 1920x1080 / 1.1
-        for value, expected in (("1.25", 1536), ("1", 1920), ("5", 960), ("0.2", 1920), ("junk", 1745)):
+            self.assertEqual(agent_ui._page_viewport(), {"width": 1920, "height": 1080})        # normal size
+            with mock.patch.dict(os.environ, {"AIBA_PAGE_ZOOM": "1.1"}):
+                self.assertEqual(agent_ui._page_viewport(), {"width": 1745, "height": 982})   # 1920x1080 / 1.1
+        for value, expected in (("1.25", 1536), ("1", 1920), ("5", 960), ("0.2", 1920), ("junk", 1920)):
             with mock.patch.dict(os.environ, {"AIBA_PAGE_ZOOM": value}):
                 self.assertEqual(agent_ui._page_viewport()["width"], expected, value)   # clamped to 1.0 .. 2.0
 

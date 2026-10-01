@@ -714,13 +714,13 @@ async def _lifespan(_app):
 app = FastAPI(lifespan=_lifespan)
 
 def _page_zoom() -> float:
-    """How much bigger the page's text and elements are drawn (1.1 = 110%, like browser zoom). It works by
+    """How much bigger the page's text and elements are drawn (1.0 = normal, 1.1 = 110%, like browser zoom). It works by
     giving the headless browser a proportionally SMALLER window (1920x1080 / zoom): the live view then
     shows the same area scaled up, so everything is larger without anything being cropped."""
     try:
-        z = float(os.getenv("AIBA_PAGE_ZOOM", "1.1"))
+        z = float(os.getenv("AIBA_PAGE_ZOOM", "1.0"))
     except ValueError:
-        z = 1.1
+        z = 1.0
     return min(2.0, max(1.0, z))
 
 
