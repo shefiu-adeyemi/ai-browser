@@ -278,6 +278,20 @@ class RealDriverPicksTheModel(unittest.IsolatedAsyncioTestCase):
         await driver.act("extract", {"query": "q"})
         self.assertEqual(driver.last_tokens, 1234)                 # this step's own use, not the running total
 
+    async def test_a_model_that_reports_no_use_leaves_no_token_figure(self):
+        class Silent:
+            model, tier, tokens = "m", "fast", 0
+
+            def reset_tokens(self):
+                self.tokens = 0
+
+        async def act(action, session, page_extraction_llm=None, **k):
+            return NS(error=None, extracted_content="ok")
+        tools = NS(registry=NS(registry=NS(actions={"extract": NS(param_model=Params)})), act=act)
+        driver = SessionDriver(object(), tools, llm=Silent())
+        await driver.act("extract", {"query": "q"})
+        self.assertIsNone(driver.last_tokens)                       # not "0 tokens": nothing was reported
+
     async def test_no_model_name_is_invented(self):
         driver, _ = self.driver(llm=object())
         await driver.act("extract", {"query": "q"})
@@ -399,6 +413,23 @@ class StartingATask(Base, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(seen.get("resume"))
 
 
+class TheController(unittest.IsolatedAsyncioTestCase):
+    async def test_it_remembers_the_tier_of_the_task_it_started(self):
+        from task_control import TaskController
+        ctl = TaskController()
+
+        async def run():
+            return None
+        ctl.start(run, origin="do it", fmt="auto", tier="fast")
+        self.assertEqual(ctl.tier, "fast")
+        await ctl.task
+        ctl2 = TaskController()
+        self.assertIsNone(ctl2.tier)
+        ctl2.start(run, origin="do it", fmt="auto")
+        self.assertIsNone(ctl2.tier)                                   # automatic is the default
+        await ctl2.task
+
+
 class TheAgent(Base):
     def make(self, **kw):
         return agent_ui._new_agent("do it", "do it", FakeLLM([]), mock.MagicMock(), None, **kw)
@@ -408,6 +439,11 @@ class TheAgent(Base):
         agent = self.make(pinned=True)
         self.assertEqual(agent.judge_llm.model, mt.read_slots(TIERED)["standard"].model)
         self.assertIsNot(agent.judge_llm, agent.llm)
+
+    def test_a_standard_model_that_cannot_review_means_no_review_even_with_a_chosen_tier(self):
+        self.env(**{**TIERED, "LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "sk-ds-xxxxxxxx"})
+        agent = self.make(provider="claude", pinned=True)            # the task runs on a Claude tier, Standard is DeepSeek
+        self.assertFalse(agent.settings.use_judge)
 
     def test_without_a_choice_nothing_changes(self):
         self.env(**TIERED)
