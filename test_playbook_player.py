@@ -495,6 +495,164 @@ class FailurePicture(PlayerCase):
             await self.run_pb(make_pb([S(1, "ai", query="decide")]))
 
 
+class Checkpoints(PlayerCase):
+    """An approve step: the user is asked before the step that follows."""
+    JPEG = b"\xff\xd8\xff-picture"
+
+    def send_pb(self, approve=True, extra=()):
+        steps = [S(1, "open", url="https://a.com/"),
+                 S(2, "type", target=fp("Message", "div", {"role": "textbox"}, 1, 2), text="Hello {{who}}"),
+                 S(3, "approve", message="Send to {{who}}?"),
+                 S(4, "click", target=fp("Send", h=7, sh=8), ask=True), *extra]
+        return make_pb(steps, variables=[Variable(name="who")], approve=approve)
+
+    def page(self, **kw):
+        page = self.build([el(1, "Message", "div", {"role": "textbox"}, h=1, sh=2), el(4, "Send", h=7, sh=8)], **kw)
+        page.risky[4] = "Click Send?"
+        async def shot(): return self.JPEG
+        page.screenshot = shot
+        return page
+
+    # ------------------------------------------------------------------------ attended
+    async def test_the_user_says_yes_and_the_send_goes_ahead_without_a_second_question(self):
+        page = self.page()
+        r = await self.run_pb(self.send_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [("approve", "Send to Jane?")])          # the checkpoint, not the click too
+        self.assertEqual(self.inner.details, ['Typed just before: "Hello Jane"'])   # exactly what will be sent
+        self.assertEqual(page.actions[-1], ("click", {"index": 4}))
+        self.assertEqual([s.approval for s in r.steps], [None, None, "asked", "preapproved"])
+
+    async def test_the_user_says_no_and_nothing_is_sent(self):
+        self.inner.answer = False
+        page = self.page()
+        r = await self.run_pb(self.send_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("You said no: Send to Jane?", r.error)
+        self.assertNotIn(("click", {"index": 4}), page.actions)
+
+    async def test_it_works_for_a_playbook_that_was_never_approved(self):
+        page = self.page()
+        r = await self.run_pb(self.send_pb(approve=False), {"who": "Jane"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [("approve", "Send to Jane?")])          # the yes covers the click too
+
+    async def test_a_yes_covers_only_the_next_step(self):
+        page = self.build([el(4, "Send", h=7, sh=8), el(5, "Delete", h=1, sh=1)])
+        page.risky[4], page.risky[5] = "Click Send?", "Click Delete?"
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "approve", message="Send?"),
+                      S(3, "click", target=fp("Send", h=7, sh=8), ask=True),
+                      S(4, "click", target=fp("Delete", h=1, sh=1), ask=True)], approve=False)
+        r = await self.run_pb(pb)
+        self.assertEqual(self.inner.asked, [("approve", "Send?"), ("approve", "Click Delete?")])   # step 4 was not covered
+        self.assertEqual(r.status, "done")
+
+    async def test_a_yes_does_not_excuse_an_unsure_match(self):
+        page = self.build([el(1, "Message", "div", {"role": "textbox"}, h=1, sh=2), el(4, "Send")])   # only the name matches
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.send_pb(), {"who": "Jane"})
+        self.assertEqual(self.inner.asked, [("approve", "Send to Jane?"), ("approve", "Click Send?")])  # asked AGAIN: not certain
+        self.assertEqual(r.steps[3].approval, "asked")
+
+    async def test_enter_after_a_yes_goes_through_only_when_the_field_was_found_with_certainty(self):
+        page = self.build([el(1, "Message", "div", {"role": "textbox"}, h=1, sh=2)])
+        page.risky_keys = "Press Enter?"
+        steps = [S(1, "open", url="https://a.com/"), S(2, "type", target=fp("Message", "div", {"role": "textbox"}, 1, 2), text="hi"),
+                 S(3, "approve", message="Send?"), S(4, "key", keys="Enter", ask=True)]
+        r = await self.run_pb(make_pb(steps, approve=False))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [("approve", "Send?")])
+        self.assertEqual(r.steps[3].approval, "preapproved")
+
+    # ----------------------------------------------------------------------- nobody there
+    async def test_with_nobody_there_the_run_is_parked_with_the_question_and_a_picture(self):
+        page = self.page(attended=False)
+        r = await self.run_pb(self.send_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "waiting")
+        self.assertEqual(self.inner.asked, [])                                        # never asks anyone
+        self.assertEqual(r.waiting, {"message": "Send to Jane?", "detail": 'Typed just before: "Hello Jane"',
+                                     "url": "https://a.com/", "timeout_minutes": 1440, "step_id": "s3", "index": 2})
+        self.assertEqual(r.screenshot, self.JPEG)
+        self.assertNotIn(("click", {"index": 4}), page.actions)                       # nothing was sent
+        self.assertEqual(len(r.steps), 3)
+        self.assertEqual(r.steps[-1].status, "waiting")
+        self.assertIn("waiting for you", r.error)
+
+    async def test_the_wait_the_playbook_asks_for_is_passed_on(self):
+        self.page(attended=False)
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "approve", message="Go?", timeout_minutes=90), S(3, "wait", seconds=1)])
+        self.assertEqual((await self.run_pb(pb)).waiting["timeout_minutes"], 90)
+
+    async def test_after_the_user_says_yes_the_run_carries_on_and_the_send_goes_ahead_unattended(self):
+        page = self.page(attended=False)
+        r = await self.run_pb(self.send_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "waiting")
+        page.actions.clear()
+        page.url_ = "about:blank"
+        r2 = await self.player.run(self.send_pb(), {"who": "Jane"}, approved={r.waiting["step_id"]})
+        self.assertEqual(r2.status, "done", r2.error)
+        self.assertEqual(page.actions[-1], ("click", {"index": 4}))
+        self.assertEqual(self.inner.asked, [])
+        self.assertEqual([s.approval for s in r2.steps], [None, None, "asked", "preapproved"])
+
+    async def test_a_yes_to_the_wrong_checkpoint_changes_nothing(self):
+        self.page(attended=False)
+        r = await self.player.run(self.send_pb(), {"who": "Jane"}, approved={"s99"})
+        self.assertEqual(r.status, "waiting")
+
+    async def test_an_old_yes_does_not_excuse_an_unsure_match_on_the_resume(self):
+        page = self.build([el(1, "Message", "div", {"role": "textbox"}, h=1, sh=2), el(4, "Send")], attended=False)
+        page.risky[4] = "Click Send?"
+        r = await self.player.run(self.send_pb(), {"who": "Jane"}, approved={"s3"})
+        self.assertEqual(r.status, "needs_you")                                       # refused: not certain enough
+        self.assertEqual(r.steps[3].status, "needs_you")
+
+    async def test_two_checkpoints_are_answered_one_at_a_time(self):
+        self.page(attended=False)
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "approve", message="First?"), S(3, "wait", seconds=1),
+                      S(4, "approve", message="Second?"), S(5, "wait", seconds=1)])
+        r1 = await self.run_pb(pb)
+        self.assertEqual(r1.waiting["step_id"], "s2")
+        r2 = await self.player.run(pb, approved={"s2"})
+        self.assertEqual((r2.status, r2.waiting["step_id"]), ("waiting", "s4"))
+        r3 = await self.player.run(pb, approved={"s2", "s4"})
+        self.assertEqual(r3.status, "done")
+
+    async def test_secrets_are_never_shown_in_the_question(self):
+        page = self.build([el(1, "Password", "input", h=1)], attended=False)
+        pb = make_pb([S(1, "open", url="https://a.com/login"),
+                      S(2, "type", target=fp("Password", "input", h=1), text="<secret>pw</secret>"),
+                      S(3, "approve", message="Log in?"), S(4, "wait", seconds=1)])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.waiting["detail"], "")
+        self.assertNotIn("pw", str(r.waiting))
+
+    async def test_what_was_typed_is_forgotten_once_the_page_moves_on(self):
+        self.build([el(1, "Message", "div", {"role": "textbox"}, h=1, sh=2), el(2, "Go", h=3, sh=4)], attended=False)
+        pb = make_pb([S(1, "open", url="https://a.com/"),
+                      S(2, "type", target=fp("Message", "div", {"role": "textbox"}, 1, 2), text="secret plan"),
+                      S(3, "click", target=fp("Go", h=3, sh=4)), S(4, "approve", message="Go on?"), S(5, "wait", seconds=1)])
+        self.assertEqual((await self.run_pb(pb)).waiting["detail"], "")
+
+    async def test_a_checkpoint_in_a_playbook_run_without_a_driver_screenshot_still_parks(self):
+        page = self.build(attended=False)
+        r = await self.run_pb(make_pb([S(1, "approve", message="Go?"), S(2, "wait", seconds=1)]))
+        self.assertEqual((r.status, r.screenshot), ("waiting", None))
+
+    async def test_the_summary_says_it_is_waiting(self):
+        self.page(attended=False)
+        pb = self.send_pb()
+        r = await self.run_pb(pb, {"who": "Jane"})
+        self.assertIn('is waiting for you: Send to Jane?', summarize(pb, r))
+        self.assertEqual(r.to_dict()["waiting"]["step_id"], "s3")
+
+    async def test_the_last_step_is_never_a_checkpoint_so_nothing_is_granted_to_nothing(self):
+        self.page(attended=False)
+        pb = make_pb([S(1, "approve", message="Go?"), S(2, "wait", seconds=1)])
+        r = await self.player.run(pb, approved={"s1"})
+        self.assertEqual(r.status, "done")
+
+
 class Timing(PlayerCase):
     async def test_time_spent_waiting_for_the_user_is_not_counted(self):
         page = self.build([el(4, "Send")], max_seconds=10)

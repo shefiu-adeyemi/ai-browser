@@ -44,6 +44,14 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 """
 
 
+def _clean_action(action: Optional[dict]) -> Optional[dict]:
+    """What a notification lets the user DO (answer a question). Only known, plain fields are kept."""
+    if not isinstance(action, dict) or action.get("type") != "checkpoint":
+        return None
+    keep = {k: str(action.get(k, ""))[:80] for k in ("type", "schedule_id", "run_id")}
+    return keep if keep["schedule_id"] and keep["run_id"] else None
+
+
 class NotificationStore:
     def __init__(self, path: Path, keep: int = KEEP) -> None:
         self.path = Path(path)
@@ -68,12 +76,13 @@ class NotificationStore:
 
     # ----------------------------------------------------------------------------- inbox
     def add(self, level: str, title: str, text: str = "", *, schedule_id: str = "", playbook_id: str = "",
-            run_id: str = "", now: Optional[datetime] = None) -> dict:
+            run_id: str = "", action: Optional[dict] = None, now: Optional[datetime] = None) -> dict:
         item = {
             "id": "n_" + secrets.token_hex(6), "ts": (now or datetime.now()).isoformat(timespec="seconds"),
             "level": level if level in LEVELS else "info",
             "title": " ".join(str(title).split())[:TITLE_MAX], "text": " ".join(str(text).split())[:TEXT_MAX],
             "schedule_id": schedule_id, "playbook_id": playbook_id, "run_id": run_id, "read": False,
+            "action": _clean_action(action),
         }
         with self._lock:
             data = self._read()

@@ -32,7 +32,7 @@ addresses with a username or password in them are refused. Text that isn't an ad
 Google; set `AIBA_SEARCH_URL` (for example `https://duckduckgo.com/?q=`) to use another engine. Google can
 show a CAPTCHA to automated browsers, which is the usual reason to switch.
 
-Two buttons in the toolbar shape the view: **Fill** zooms the page in 10 to 25% so the grey bands shrink
+Two buttons in the toolbar shape the view: **Fill** zooms the page in 10 to 15% so the grey bands shrink
 (cropping a little at the edges) and **Fit** shows the whole page. The chat panel can be resized (drag the
 divider), widened, or hidden to a slim rail; your choices are remembered.
 

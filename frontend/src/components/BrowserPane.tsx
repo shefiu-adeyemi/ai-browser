@@ -132,7 +132,7 @@ export default function BrowserPane({
   // How the page is laid out in the pane. "Fill" zooms in a little (10% to 25%) so the grey bands shrink or
   // vanish, which crops the edges; "Fit" shows the whole page with bands where the shapes differ.
   const ZOOM = 1.1        // at least this much bigger than Fit
-  const MAX_ZOOM = 1.25   // and at most this much
+  const MAX_ZOOM = 1.15   // and at most this much (more would crop too much of a left-aligned page)
   const areaRef = useRef<HTMLDivElement>(null)
   const [area, setArea] = useState({ w: 0, h: 0 })
   const [frameSize, setFrameSize] = useState({ w: 1280, h: 800 })

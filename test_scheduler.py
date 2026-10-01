@@ -36,12 +36,14 @@ class Harness(unittest.IsolatedAsyncioTestCase):
         self.now = T0
         self.idle = True
         self.calls: list[tuple] = []                  # (playbook name, values, row)
+        self.extras: list[dict] = []                  # what a resumed run passes besides those
         self.script: list = []                        # Outcomes (or exceptions) to return, in order
         self.notes: list[dict] = []
         self.maintained: list[int] = []
 
-        async def execute(pb, values, s, row):
+        async def execute(pb, values, s, row, **extra):
             self.calls.append((pb.name, dict(values), row))
+            self.extras.append(extra)
             nxt = self.script.pop(0) if self.script else Outcome("done", run_id="run_" + "1" * 12)
             if isinstance(nxt, BaseException):
                 raise nxt
@@ -236,9 +238,9 @@ class Rows(Harness):
         s = self.add(next_run=sch.iso(T0))
         orig = self.sched._execute
 
-        async def deleting(pb, values, sc, row):
+        async def deleting(pb, values, sc, row, **extra):
             self.scheds.delete(sc.id)
-            return await orig(pb, values, sc, row)
+            return await orig(pb, values, sc, row, **extra)
         self.sched._execute = deleting
         await self.sched.tick()
         self.assertEqual(self.scheds.all(), [])
@@ -434,9 +436,9 @@ class CrashSafety(Harness):
         seen = {}
         orig = self.sched._execute
 
-        async def peek(pb, values, sc, row):
+        async def peek(pb, values, sc, row, **extra):
             seen["inflight"] = self.scheds.get(sc.id).state.inflight
-            return await orig(pb, values, sc, row)
+            return await orig(pb, values, sc, row, **extra)
         self.sched._execute = peek
         await self.sched.tick()
         self.assertEqual(seen["inflight"], 0)
@@ -549,6 +551,287 @@ class Quiet(Harness):
         self.now = datetime(2026, 10, 2, 7, 5)
         await self.sched.tick()
         self.assertEqual(len(self.calls), 1)
+
+
+class Checkpoints(Harness):
+    """A run parked at an approve step, and what the user's answer (or silence) does."""
+    def setUp(self):
+        self.resolved: list[tuple] = []
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.sched._resolved = lambda s, job, status, detail: self.resolved.append((job.run_id, status, detail))
+        fp = Fingerprint(node_name="button", ax_name="Send")
+        self.send = self.pbs.save(pbk.refresh(Playbook(
+            name="Message", variables=[Variable(name="p", type="linkedin_url")],
+            steps=[Step(id="s1", kind="open", url="{{p}}"), Step(id="s2", kind="approve", message="Send to {{p}}?"),
+                   Step(id="s3", kind="click", target=fp, ask=True)])), approve=True)
+
+    def waiting(self, n=1, run="run_" + "a" * 12, timeout=1440):
+        return Outcome("waiting", run_id=run, detail="waiting", waiting={
+            "message": "Send to Jane?", "detail": 'Typed just before: "Hello Jane"', "url": "https://www.linkedin.com/in/jane",
+            "step_id": "s2", "index": 1, "timeout_minutes": timeout})
+
+    def make(self, rows=1, **kw):
+        return self.add(playbook_id=self.send.id, items=self.rows(rows), next_run=sch.iso(T0), **kw)
+
+    async def park(self, rows=1, **kw):
+        self.script = [self.waiting()]
+        s = self.make(rows, **kw)
+        await self.sched.tick()
+        return s
+
+    # ---------------------------------------------------------------------------- parking
+    async def test_a_run_that_reaches_an_approve_step_is_parked_not_failed(self):
+        s = await self.park()
+        got = self.get(s)
+        (job,) = got.state.parked
+        self.assertEqual((job.row, job.run_id, job.step_id, job.message), (0, "run_" + "a" * 12, "s2", "Send to Jane?"))
+        self.assertEqual(job.detail, 'Typed just before: "Hello Jane"')
+        self.assertEqual(job.values, {"p": PROFILE.format("p0")})
+        self.assertEqual(job.approved, [])
+        self.assertEqual(sch.parse_iso(job.expires_at) - sch.parse_iso(job.parked_at), timedelta(hours=24))
+        self.assertTrue(job.pb_hash)
+        self.assertEqual((got.state.queue, got.state.paused_reason, got.state.last_status, got.state.runs_total), ([], "", "waiting", 1))
+        self.assertEqual([r.status for r in got.state.batch_results], ["waiting"])
+
+    async def test_the_user_is_told_and_can_answer_from_the_notification(self):
+        s = await self.park()
+        (n,) = self.notes
+        self.assertEqual((n["level"], n["title"]), ("warning", 'Waiting for you: "Daily"'))
+        self.assertIn("Send to Jane?", n["text"])
+        self.assertIn("Hello Jane", n["text"])
+        self.assertEqual(n["action"], {"type": "checkpoint", "schedule_id": s.id, "run_id": "run_" + "a" * 12})
+
+    async def test_a_wait_the_playbook_asked_for_is_used(self):
+        self.script = [self.waiting(timeout=90)]
+        s = self.make()
+        await self.sched.tick()
+        job = self.get(s).state.parked[0]
+        self.assertEqual(sch.parse_iso(job.expires_at) - sch.parse_iso(job.parked_at), timedelta(minutes=90))
+
+    async def test_the_browser_is_free_for_the_next_rows_while_one_waits(self):
+        self.script = [self.waiting()]
+        s = self.make(rows=3)
+        await self.ticks(8, step=timedelta(seconds=60))
+        self.assertEqual([c[2] for c in self.calls], [0, 1, 2])
+        got = self.get(s)
+        self.assertEqual([r.status for r in sorted(got.state.batch_results, key=lambda r: r.index)], ["waiting", "done", "done"])
+        self.assertEqual(len(got.state.parked), 1)
+        self.assertEqual([n["title"] for n in self.notes], ['Waiting for you: "Daily"'])     # no "finished" while one waits
+
+    async def test_a_parked_run_still_counts_toward_the_daily_allowance(self):
+        await self.park()
+        self.assertEqual(self.limits.used_today("linkedin_profile_view", T0.date()), 1)
+
+    # ------------------------------------------------------------------------------- yes
+    async def test_yes_runs_it_again_from_the_top_with_the_answer_remembered(self):
+        s = await self.park()
+        self.assertEqual(await self.sched.answer(s.id, "run_" + "a" * 12, True), "")
+        got = self.get(s)
+        self.assertEqual(([j.approved for j in got.state.resume], got.state.parked), ([["s2"]], []))
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.extras[-1], {"approved": frozenset({"s2"}), "run_id": "run_" + "a" * 12})
+        self.assertEqual(self.calls[-1][1], {"p": PROFILE.format("p0")})                   # the SAME inputs it was asked about
+        got = self.get(s)
+        self.assertEqual((got.state.resume, got.state.parked, got.state.last_status), ([], [], "done"))
+        self.assertEqual([r.status for r in got.state.batch_results], ["done"])            # replaced, not added to
+
+    async def test_a_resume_counts_as_another_visit(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(self.limits.used_today("linkedin_profile_view", T0.date()), 2)
+
+    async def test_an_answered_run_goes_before_waiting_rows(self):
+        self.script = [self.waiting()]
+        s = self.make(rows=3)
+        await self.sched.tick()                                                           # row 0 parks
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual([c[2] for c in self.calls], [0, 0])                              # the answered one first
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual([c[2] for c in self.calls], [0, 0, 1])
+
+    async def test_the_answered_run_is_marked_in_flight_and_gone_from_the_list_while_it_runs(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        seen = {}
+        orig = self.sched._execute
+
+        async def peek(pb, values, sc, row, **extra):
+            st = self.scheds.get(sc.id).state
+            seen.update(inflight=st.inflight, resume=list(st.resume))
+            return await orig(pb, values, sc, row, **extra)
+        self.sched._execute = peek
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual((seen["inflight"], seen["resume"]), (0, []))                      # a crash now cannot send twice
+
+    async def test_a_crash_while_an_answered_run_runs_is_reported_not_repeated(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.scheds.change_state(s.id, lambda st: st.model_copy(update={"resume": [], "inflight": 0}))   # as if it died mid-run
+        n_calls = len(self.calls)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), n_calls)
+        self.assertIn("may or may not have finished", self.get(s).state.last_detail)
+
+    async def test_a_second_checkpoint_parks_again_remembering_the_first_yes(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.script = [Outcome("waiting", run_id="run_" + "a" * 12, detail="w", waiting={
+            "message": "Really?", "detail": "", "url": "", "step_id": "s9", "index": 3, "timeout_minutes": 60})]
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        (job,) = self.get(s).state.parked
+        self.assertEqual((job.step_id, job.approved), ("s9", ["s2"]))
+
+    # -------------------------------------------------------------------------------- no
+    async def test_no_ends_the_run_and_nothing_is_sent(self):
+        s = await self.park(rows=2)
+        self.assertEqual(await self.sched.answer(s.id, "run_" + "a" * 12, False), "")
+        got = self.get(s)
+        self.assertEqual((got.state.parked, got.state.resume, got.state.paused_reason), ([], [], ""))
+        self.assertEqual(self.resolved, [("run_" + "a" * 12, "declined", "You said no: Send to Jane?")])
+        await self.ticks(6, step=timedelta(seconds=120))
+        self.assertEqual([c[2] for c in self.calls], [0, 1])                                # row 0 never ran again
+        self.assertEqual(self.get(s).state.paused_reason, "")                               # a no pauses nothing
+
+    async def test_a_no_is_not_reported_as_a_problem(self):
+        s = await self.park(rows=1)
+        await self.sched.answer(s.id, "run_" + "a" * 12, False)
+        self.assertEqual([n["title"] for n in self.notes], ['Waiting for you: "Daily"'])    # no "need you" summary for a no
+
+    async def test_answers_that_make_no_sense(self):
+        s = await self.park()
+        self.assertIn("no longer exists", await self.sched.answer("sch_" + "0" * 12, "run_" + "a" * 12, True))
+        self.assertIn("already answered", await self.sched.answer(s.id, "run_" + "b" * 12, True))
+        self.assertEqual(await self.sched.answer(s.id, "run_" + "a" * 12, True), "")
+        self.assertIn("already answered", await self.sched.answer(s.id, "run_" + "a" * 12, True))      # twice
+        self.assertIn("already answered", await self.sched.answer(s.id, "run_" + "a" * 12, False))     # or the other way
+
+    # ---------------------------------------------------------------------------- silence
+    async def test_silence_is_a_no(self):
+        s = await self.park()
+        self.now += timedelta(hours=23)
+        await self.sched.tick()
+        self.assertEqual(len(self.get(s).state.parked), 1)                                  # still waiting
+        self.now += timedelta(hours=2)
+        await self.sched.tick()
+        got = self.get(s)
+        self.assertEqual((got.state.parked, got.state.resume), ([], []))
+        self.assertEqual([r.status for r in got.state.batch_results], ["expired"])
+        self.assertEqual(self.resolved[0][1], "expired")
+        self.assertEqual(len(self.calls), 1)                                                # it never ran again
+        # (the daily schedule's own next time also passed meanwhile, which is a separate "missed" notice)
+        self.assertEqual([n["title"] for n in self.notes][:2], ['Waiting for you: "Daily"', 'Cancelled: "Daily"'])
+        self.assertIn("not sent", self.notes[1]["text"])
+
+    async def test_silence_is_noticed_even_while_everything_is_paused(self):
+        s = await self.park()
+        self.scheds.set_paused_all(True)
+        self.now += timedelta(hours=25)
+        await self.sched.tick()
+        self.assertEqual(self.get(s).state.parked, [])
+
+    async def test_an_answer_that_arrives_after_the_time_is_too_late(self):
+        s = await self.park()
+        self.now += timedelta(hours=25)
+        await self.sched.tick()
+        self.assertIn("already answered", await self.sched.answer(s.id, "run_" + "a" * 12, True))
+        self.assertEqual(len(self.calls), 1)
+
+    # --------------------------------------------------------------- what was approved must still stand
+    async def test_if_the_playbook_changed_while_waiting_the_yes_is_void(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        pb = self.pbs.get(self.send.id)
+        self.pbs.save(pb.model_copy(update={"steps": [*pb.steps[:2], pb.steps[2].model_copy(update={"ask": False})]}), approve=True)
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)                                                # not run
+        self.assertEqual(self.resolved[0][1], "cancelled")
+        self.assertIn("changed while this waited", self.resolved[0][2])
+        self.assertEqual(self.get(s).state.resume, [])
+
+    async def test_if_the_approval_was_taken_back_the_yes_is_void(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.pbs.save(self.pbs.get(self.send.id), revoke=True)
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.resolved[0][1], "cancelled")
+
+    async def test_a_deleted_playbook_pauses_the_schedule_and_keeps_nothing_running(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.pbs.delete(self.send.id)
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual((len(self.calls), self.get(s).state.paused_reason), (1, "invalid"))
+
+    # --------------------------------------------------------------------- when it gets its turn
+    async def test_it_waits_for_the_user_to_be_idle_and_for_quiet_hours(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.idle = False
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
+        self.idle = True
+        self.scheds.set_quiet_hours(QuietHours(enabled=True, start="00:00", end="23:59"))
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.get(s).state.resume), 1)                                  # the answer is kept
+        self.scheds.set_quiet_hours(QuietHours(enabled=False))
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_a_busy_browser_puts_the_answer_back(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.script = [Outcome("busy")]
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        got = self.get(s)
+        self.assertEqual(([j.run_id for j in got.state.resume], got.state.inflight), (["run_" + "a" * 12], None))
+        await self.sched.tick()
+        self.assertEqual(self.get(s).state.last_status, "done")
+
+    async def test_the_daily_allowance_holds_an_answered_run_without_losing_it(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        for _ in range(60):
+            self.limits.record({"linkedin_profile_view": 1}, self.now)
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.get(s).state.resume), 1)
+
+    async def test_a_paused_schedule_does_not_resume_until_the_user_resumes_it(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.scheds.change_state(s.id, lambda st: st.model_copy(update={"paused_reason": "failed"}))
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
+
+    # --------------------------------------------------------------------------- the summary
+    async def test_the_batch_summary_comes_once_the_last_question_is_settled(self):
+        self.script = [self.waiting(), Outcome("done")]
+        s = self.make(rows=2)
+        await self.ticks(5, step=timedelta(seconds=120))
+        self.assertEqual([n["title"] for n in self.notes], ['Waiting for you: "Daily"'])
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        await self.ticks(3, step=timedelta(seconds=120))
+        self.assertEqual([n["title"] for n in self.notes], ['Waiting for you: "Daily"', 'Finished: "Daily"'])
 
 
 class Loop(Harness):

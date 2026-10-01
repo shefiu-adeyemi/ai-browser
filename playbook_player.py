@@ -47,24 +47,26 @@ class StepResult:
     id: str
     kind: str
     note: str = ""
-    status: str = "ok"            # ok | failed | needs_you
+    status: str = "ok"            # ok | failed | needs_you | waiting (an approve step with nobody there)
     detail: str = ""
     seconds: float = 0.0
     matched: Optional[str] = None     # how the element was found (exact, stable, identity, ...)
     approval: Optional[str] = None    # preapproved | asked | None
     output: Optional[str] = None      # what an extract step read
     fatal: bool = False               # the run must stop even if later steps could go on
+    meta: Optional[dict] = None       # for a waiting step: what is being asked (see PlaybookPlayer._approve)
 
 
 @dataclass
 class RunResult:
-    status: str = "done"           # done | failed | needs_you
+    status: str = "done"           # done | failed | needs_you | waiting
     steps: list[StepResult] = field(default_factory=list)
     outputs: list[dict] = field(default_factory=list)
     error: str = ""
     started_at: float = 0.0
     finished_at: float = 0.0
     screenshot: Optional[bytes] = None      # what the page looked like when the run stopped (JPEG), if it did not finish
+    waiting: Optional[dict] = None          # set when the run is parked at an approve step: the question and where
 
 
     @property
@@ -74,7 +76,7 @@ class RunResult:
     def to_dict(self) -> dict:
         return {"status": self.status, "error": self.error, "seconds": self.seconds,
                 "steps": [asdict(s) for s in self.steps], "outputs": self.outputs,
-                "screenshot": self.screenshot is not None}
+                "screenshot": self.screenshot is not None, "waiting": self.waiting}
 
 
 # ------------------------------------------------------------------------------- approvals
@@ -225,7 +227,11 @@ class PlaybookPlayer:
                 pass
 
     # ----------------------------------------------------------------------------- run
-    async def run(self, pb: Playbook, supplied: Optional[dict] = None) -> RunResult:
+    async def run(self, pb: Playbook, supplied: Optional[dict] = None,
+                  approved: Optional[set[str]] = None) -> RunResult:
+        """Run the playbook from the top. `approved` holds the ids of approve steps the user has ALREADY said
+        yes to in an earlier attempt of this same run: they pass at once (and grant the step after them), which
+        is how a run that was parked while nobody was there carries on once the user answers."""
         result = RunResult(started_at=self._clock())
 
         def finish(status: str, error: str = "") -> RunResult:
@@ -245,6 +251,10 @@ class PlaybookPlayer:
         self._logs_in = any((s.kind == "type" and s.text and pbk.SECRET_RE.search(s.text)) or s.kind == "handoff"
                             for s in pb.steps)
         self._values = values
+        self._approved_cps = set(approved or ())
+        self._granted: set[str] = set()         # steps the user said yes to at an approve step, for THIS run only
+        self._typed = ""                        # the last text typed (never a secret), shown at the next approve step
+        self._steps = pb.steps
         self._prev_high = False                 # was the previous step an element step matched with high confidence?
         self._variables = {v.name: v for v in pb.variables}
         allowed = pbk.compute_domains(pb)     # recomputed: the stored list is not what the approval covers
@@ -267,7 +277,9 @@ class PlaybookPlayer:
                 res = StepResult(step.id, step.kind, describe(step), "failed",
                                  f"Unexpected error: {type(e).__name__}: {e}")
             res.id, res.kind, res.note = step.id, step.kind, describe(step)
-            self._prev_high = res.status == "ok" and (res.matched or "").endswith("(high)")
+            self._track_typed(step, res)
+            if step.kind != "approve":              # asking the user changes nothing on the page: focus is where it was
+                self._prev_high = res.status == "ok" and (res.matched or "").endswith("(high)")
             res.seconds = round(self._clock() - t0, 2)
             result.steps.append(res)
 
@@ -280,6 +292,11 @@ class PlaybookPlayer:
                     res.detail = f"Stopped: the page went to {left}, which this playbook is not approved to visit."
                 else:
                     await self._check_sign_in(res)
+            if res.status == "waiting":
+                await self._say(f"⏸ Step {n} is waiting for you: {res.detail}")
+                result.screenshot = await self._picture()
+                result.waiting = {**(res.meta or {}), "step_id": step.id, "index": n - 1}
+                return finish("waiting", f"Step {n} ({describe(step)}): waiting for you.")
             if res.status != "ok":
                 await self._say(f"✖ Step {n} stopped the run: {res.detail}")
                 result.screenshot = await self._picture()
@@ -299,6 +316,8 @@ class PlaybookPlayer:
             return await self._tab(step)
         if kind == "handoff":
             return await self._handoff(step)
+        if kind == "approve":
+            return await self._approve(step)
         if kind == "back":
             return await self._act_step(step, "go_back", {})
         if kind == "wait":
@@ -307,7 +326,7 @@ class PlaybookPlayer:
         if kind == "key":
             # Enter/Space act on whatever has focus. That is only the control the user approved if the
             # step before it found ITS element with certainty; otherwise the user is asked.
-            self.approver.begin(step.ask and self._preapproved_playbook and self._prev_high)
+            self.approver.begin(step.ask and (self._preapproved_playbook or step.id in self._granted) and self._prev_high)
             keys = pbk.render(step.keys, self._values) or ""
             return await self._act_step(step, "send_keys", {"keys": keys})
         if kind == "scroll" and step.target is None:
@@ -359,6 +378,31 @@ class PlaybookPlayer:
                               detail=f"There is no tab number {idx + 1} (only {len(ids)} open).")
         return await self._act_step(step, "close" if step.close_tab else "switch", {"tab_id": ids[idx]})
 
+    async def _approve(self, step: Step) -> StepResult:
+        """A checkpoint: the user is asked before the step that follows. They see what is about to happen and,
+        if they typed something just before, exactly what. A yes lets the NEXT step (and only it) through, and
+        even then a risky click still needs its element found with certainty. With nobody there the run is
+        parked ("waiting"); silence is never a yes."""
+        message = pbk.render(step.message, self._values) or ""
+        ids = [x.id for x in self._steps]
+        at = ids.index(step.id)
+        later = self._steps[at + 1] if at + 1 < len(ids) else None
+        detail = f'Typed just before: "{self._typed[:300]}"' if self._typed else ""
+        url = await self._safe_url()
+        if step.id in self._approved_cps:                          # answered earlier in this run: yes
+            if later is not None:
+                self._granted.add(later.id)
+            return StepResult(step.id, "approve", approval="asked")
+        if self.approver.attended and self.approver.inner is not None:
+            if await self.approver.ask("approve", message, detail, url):
+                if later is not None:
+                    self._granted.add(later.id)
+                return StepResult(step.id, "approve", approval="asked")
+            return StepResult(step.id, "approve", status="needs_you", detail=f"You said no: {message}")
+        return StepResult(step.id, "approve", status="waiting", detail=message,
+                          meta={"message": message, "detail": detail, "url": url,
+                                "timeout_minutes": step.timeout_minutes or pbk.DEFAULT_APPROVAL_MINUTES})
+
     async def _handoff(self, step: Step) -> StepResult:
         """A step only a person can do (sign in, a CAPTCHA, typing a password). Attended: ask, and carry
         on when they say they are done. Unattended: the run stops, "needs you"."""
@@ -402,7 +446,8 @@ class PlaybookPlayer:
             if match is None:
                 return StepResult(step.id, step.kind, status="failed",
                                   detail=f"Couldn't find {_step_target_text(step)} on the page." + await self._hint(step))
-            self.approver.begin(step.ask and self._preapproved_playbook and match.confidence == "high")
+            self.approver.begin(step.ask and (self._preapproved_playbook or step.id in self._granted)
+                                and match.confidence == "high")
             if step.kind == "click":
                 name, params = "click", {"index": match.index}
             elif step.kind == "type":
@@ -488,6 +533,15 @@ class PlaybookPlayer:
         except Exception:
             return ""
 
+    def _track_typed(self, step: Step, res: StepResult) -> None:
+        if res.status != "ok":
+            return
+        if step.kind == "type":
+            text = pbk.render(step.text, self._values) or ""
+            self._typed = "" if pbk.SECRET_RE.search(step.text or "") else text
+        elif step.kind in ("open", "search", "click", "key", "tab", "back", "select"):
+            self._typed = ""
+
     async def _picture(self) -> Optional[bytes]:
         """What the page looked like when the run stopped, for the failure report. Never raises."""
         take = getattr(self.driver, "screenshot", None)
@@ -518,6 +572,8 @@ def summarize(pb: Playbook, run: RunResult) -> str:
         head = f'Ran "{pb.name}": all {total} step{"" if total == 1 else "s"} done in {run.seconds:g} s.'
     elif run.status == "needs_you":
         head = f'"{pb.name}" stopped: it needs you. {run.error}'
+    elif run.status == "waiting":
+        head = f'"{pb.name}" is waiting for you: {(run.waiting or {}).get("message", "an approval")}'
     else:
         head = f'"{pb.name}" stopped after {done} of {total} steps. {run.error}'
     parts = [head]

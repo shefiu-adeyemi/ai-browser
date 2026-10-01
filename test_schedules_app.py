@@ -20,7 +20,7 @@ from playbook_runs import RunStore
 from playbook_store import PlaybookStore
 from schedule_store import ScheduleStore
 from scheduler import Outcome, Scheduler
-from site_limits import SiteLimits
+from site_limits import Decision, SiteLimits
 
 URL = "https://www.linkedin.com/in/jane-doe"
 REAL_SCHEDULER = agent_ui._scheduler        # the one the app really uses (the tests below swap in their own)
@@ -454,8 +454,9 @@ class Handoff(Base, unittest.IsolatedAsyncioTestCase):
         outer = self
 
         class FakePlayer:
-            async def run(self, pb, values):
+            async def run(self, pb, values, approved=None):
                 outer.player_args = (pb, values)
+                outer.approved_seen = approved
                 if isinstance(outer.result, BaseException):
                     raise outer.result
                 if outer.result == "hang":
@@ -562,6 +563,144 @@ class Handoff(Base, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.toasts[0][0], 'Needs you: "Daily"')
         self.assertEqual(self.limits.used_today("linkedin_profile_view", datetime.now().date()), 1)
         self.assertEqual(len(self.runs.recent(pbk_saved.id)), 1)
+
+
+class CheckpointFlow(Base, unittest.IsolatedAsyncioTestCase):
+    """A scheduled run that reaches an approve step is parked, answered from the inbox, and run again."""
+    async def asyncSetUp(self):
+        asyncio.get_running_loop().set_debug(False)
+        self.ws = FakeClient()
+        agent_ui._clients.add(self.ws)
+        self.addCleanup(agent_ui._clients.discard, self.ws)
+        fp = Fingerprint(node_name="button", ax_name="Send")
+        self.send = self.pbs.save(pbk.refresh(Playbook(
+            name="Message", variables=[Variable(name="p", type="linkedin_url")],
+            steps=[Step(id="s1", kind="open", url="{{p}}"), Step(id="s2", kind="approve", message="Send to {{p}}?"),
+                   Step(id="s3", kind="click", target=fp, ask=True)])), approve=True)
+        self.schedule = self.scheds.save(sch.Schedule(name="Outreach", playbook_id=self.send.id, items=[{"p": URL}]))
+        self.waiting = {"message": "Send to Jane?", "detail": 'Typed just before: "Hi"', "url": URL, "step_id": "s2",
+                        "index": 1, "timeout_minutes": 60}
+        self.result = RunResult(status="waiting", error="Step 2: waiting for you.", started_at=0, finished_at=1,
+                                steps=[StepResult("s1", "open"), StepResult("s2", "approve", status="waiting")],
+                                waiting=self.waiting, screenshot=b"\xff\xd8\xff-picture")
+        self.approved_seen = None
+        self.starts = 0
+        outer = self
+        p = mock.patch.object(self.limits, "check", return_value=Decision(True))        # pacing is tested elsewhere
+        p.start(); self.addCleanup(p.stop)
+
+        class FakePlayer:
+            async def run(self, pb, values, approved=None):
+                outer.approved_seen = approved
+                outer.starts += 1
+                return outer.result
+        async def build(pb, attended):
+            return FakePlayer()
+        p = mock.patch.object(agent_ui, "_build_player", build)
+        p.start(); self.addCleanup(p.stop)
+        self.real = Scheduler(schedules=self.scheds, playbooks=self.pbs, limits=self.limits, execute=agent_ui._execute_scheduled,
+                              idle=lambda: not agent_ui._ctl.running, notify=agent_ui._notify_user,
+                              resolved=agent_ui._record_parked_end)
+        p = mock.patch.object(agent_ui, "_scheduler", self.real)
+        p.start(); self.addCleanup(p.stop)
+        self.scheds.change_state(self.schedule.id, lambda st: st.model_copy(update={
+            "next_run": sch.iso(datetime.now() - timedelta(seconds=5))}))
+        from fastapi.testclient import TestClient
+        self.client = TestClient(agent_ui.app, base_url="http://localhost:8000")
+        self.client.get("/")
+
+    async def park(self):
+        await self.real.tick()
+        return self.scheds.get(self.schedule.id).state.parked[0]
+
+    async def test_the_scheduled_run_parks_and_the_record_says_what_it_is_waiting_for(self):
+        job = await self.park()
+        rec = self.runs.get(self.send.id, job.run_id)
+        self.assertEqual(rec["status"], "waiting")
+        self.assertEqual(rec["waiting"]["message"], "Send to Jane?")
+        self.assertTrue(rec["screenshot"])                                         # what the page looked like at the question
+        self.assertEqual(self.runs.screenshot(self.send.id, job.run_id), b"\xff\xd8\xff-picture")
+        self.assertEqual(rec["answered"], [])
+        self.assertFalse(agent_ui._ctl.running)                                    # the browser is free again
+        self.assertEqual(self.ws.of("status")[-1]["text"], "done")                 # not shown as an error
+
+    async def test_the_question_is_in_the_inbox_with_buttons_and_in_the_schedule(self):
+        job = await self.park()
+        n = self.notes.recent()[0]
+        self.assertEqual(n["action"], {"type": "checkpoint", "schedule_id": self.schedule.id, "run_id": job.run_id})
+        self.assertEqual(self.ws.of("notification")[0]["action"]["run_id"], job.run_id)
+        row = self.client.get("/schedules").json()["schedules"][0]
+        self.assertEqual(row["status"], "asking")
+        self.assertEqual(row["pending"][0]["message"], "Send to Jane?")
+        self.assertEqual(row["pending"][0]["detail"], 'Typed just before: "Hi"')
+
+    async def test_yes_over_http_runs_it_again_under_the_same_run_id_with_the_answer(self):
+        job = await self.park()
+        r = self.client.post(f"/schedules/{self.schedule.id}/checkpoints/{job.run_id}/answer", json={"approve": True})
+        self.assertEqual(r.json(), {"ok": True})
+        self.result = RunResult(status="done", steps=[StepResult("s1", "open")], started_at=0, finished_at=2)
+        await self.real.tick()
+        self.assertEqual(self.approved_seen, {"s2"})
+        rec = self.runs.get(self.send.id, job.run_id)
+        self.assertEqual((rec["status"], rec["answered"]), ("done", ["s2"]))
+        self.assertEqual(len(self.runs.recent(self.send.id)), 1)                    # one entry, not two
+        self.assertEqual(self.scheds.get(self.schedule.id).state.last_status, "done")
+
+    async def test_no_over_http_ends_it_and_the_history_says_so(self):
+        job = await self.park()
+        r = self.client.post(f"/schedules/{self.schedule.id}/checkpoints/{job.run_id}/answer", json={"approve": False})
+        self.assertTrue(r.json()["ok"])
+        rec = self.runs.get(self.send.id, job.run_id)
+        self.assertEqual(rec["status"], "declined")
+        self.assertNotIn("waiting", rec)
+        self.assertIn("You said no", rec["error"])
+        await self.real.tick()
+        self.assertEqual(self.starts, 1)                                            # never run again
+
+    async def test_only_a_real_true_is_a_yes(self):
+        job = await self.park()
+        for sneaky in ("true", 1, "yes", [True], None):
+            self.client.post(f"/schedules/{self.schedule.id}/checkpoints/{job.run_id}/answer", json={"approve": sneaky})
+            self.assertEqual(self.scheds.get(self.schedule.id).state.resume, [], sneaky)    # all of those were a no
+            break                                                                  # the first no already ended it
+
+    async def test_a_yes_to_something_that_is_not_waiting_is_refused(self):
+        job = await self.park()
+        base = f"/schedules/{self.schedule.id}/checkpoints"
+        self.assertEqual(self.client.post(f"{base}/run_{'0' * 12}/answer", json={"approve": True}).status_code, 409)
+        self.assertEqual(self.client.post(f"/schedules/sch_{'0' * 12}/checkpoints/{job.run_id}/answer", json={"approve": True}).status_code, 404)
+        self.assertEqual(self.client.post(f"{base}/..%5Cx/answer", json={"approve": True}).status_code, 400)
+        self.assertEqual(self.client.post("/schedules/nope/checkpoints/x/answer", json={"approve": True}).status_code, 400)
+        self.assertEqual(self.client.post(f"{base}/{job.run_id}/answer", json={"approve": True}).status_code, 200)
+        self.assertEqual(self.client.post(f"{base}/{job.run_id}/answer", json={"approve": True}).status_code, 409)   # twice
+
+    async def test_the_answer_needs_the_app_cookie(self):
+        from fastapi.testclient import TestClient
+        job = await self.park()
+        stranger = TestClient(agent_ui.app, base_url="http://localhost:8000")
+        r = stranger.post(f"/schedules/{self.schedule.id}/checkpoints/{job.run_id}/answer", json={"approve": True})
+        self.assertIn(r.status_code, (401, 403))
+        self.assertEqual(self.scheds.get(self.schedule.id).state.resume, [])
+
+    async def test_deleting_the_schedule_cancels_what_was_waiting(self):
+        job = await self.park()
+        self.assertTrue(self.client.delete(f"/schedules/{self.schedule.id}").json()["deleted"])
+        rec = self.runs.get(self.send.id, job.run_id)
+        self.assertEqual(rec["status"], "cancelled")
+        self.assertIn("schedule was deleted", rec["error"])
+
+    async def test_a_send_guarded_by_an_approve_step_can_be_scheduled_without_the_blanket_tick(self):
+        body = {"schedule": {"name": "Guarded", "playbook_id": self.send.id, "items": [{"p": URL}],
+                             "cadence": {"kind": "daily", "at": "09:00"}, "allow_sensitive": False}}
+        self.assertEqual(self.client.post("/schedules", json=body).status_code, 200)
+
+    async def test_silence_cancels_and_the_history_says_so(self):
+        job = await self.park()
+        self.scheds.change_state(self.schedule.id, lambda st: st.model_copy(update={"parked": [
+            job.model_copy(update={"expires_at": sch.iso(datetime.now() - timedelta(minutes=1))})]}))
+        await self.real.tick()
+        self.assertEqual(self.runs.get(self.send.id, job.run_id)["status"], "expired")
+        self.assertEqual(self.scheds.get(self.schedule.id).state.parked, [])
 
 
 class ManualRunsCount(Base, unittest.IsolatedAsyncioTestCase):

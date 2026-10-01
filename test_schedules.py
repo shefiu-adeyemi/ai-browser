@@ -167,6 +167,18 @@ class Scheduling(unittest.TestCase):
         self.assertTrue(sch.validate_schedule(make(items=[{}], allow_sensitive=True),
                                               approved_pb(steps=pb.steps, variables=[], approve=False), NOW))
 
+    def test_a_send_that_asks_you_first_needs_no_blanket_permission(self):
+        fp = pbk.Fingerprint(node_name="button", ax_name="Send")
+        guarded = approved_pb(steps=[Step(id="s1", kind="open", url="https://a.com/"),
+                                     Step(id="s2", kind="approve", message="Send it?"),
+                                     Step(id="s3", kind="click", target=fp, ask=True)], variables=[])
+        self.assertEqual(sch.validate_schedule(make(items=[{}]), guarded, NOW), [])
+        mixed = approved_pb(steps=[Step(id="s1", kind="click", target=fp, ask=True),
+                                   Step(id="s2", kind="approve", message="Send it?"),
+                                   Step(id="s3", kind="click", target=fp, ask=True)], variables=[])
+        probs = sch.validate_schedule(make(items=[{}]), mixed, NOW)
+        self.assertTrue(any("Step 1 sends" in p and "ask me first" in p for p in probs), probs)    # only the unguarded one
+
     def test_steps_that_need_a_person_or_an_ai_are_refused(self):
         pb = approved_pb(steps=[Step(id="s1", kind="open", url="https://a.com/"),
                                 Step(id="s2", kind="handoff", message="sign in"),

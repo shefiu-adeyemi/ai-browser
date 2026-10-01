@@ -186,6 +186,67 @@ def urlparse_host(url):
     return urlparse(url).hostname
 
 
+class ApproveStep(unittest.TestCase):
+    """A checkpoint: the run asks the user before the step that follows."""
+    fp = Fingerprint(node_name="button", ax_name="Send")
+
+    def pb(self, *steps, variables=None):
+        return Playbook(name="x", steps=list(steps), variables=variables or [])
+
+    def test_a_checkpoint_before_a_send(self):
+        pb = self.pb(Step(id="s1", kind="approve", message="Send it?", timeout_minutes=60),
+                     Step(id="s2", kind="click", target=self.fp, ask=True))
+        self.assertEqual(pbk.validate(pb), [])
+        self.assertFalse(Step(id="s1", kind="approve", message="m").tag == "ai")
+
+    def test_it_needs_a_message_and_a_step_to_guard(self):
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve"), Step(id="s2", kind="back"))))
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve", message="  "), Step(id="s2", kind="back"))))
+        probs = pbk.validate(self.pb(Step(id="s1", kind="back"), Step(id="s2", kind="approve", message="m")))
+        self.assertTrue(any("BEFORE the step it guards" in p for p in probs), probs)
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve", message="m"))))     # alone, so last
+
+    def test_the_message_may_use_the_inputs_but_not_secrets(self):
+        ok = self.pb(Step(id="s1", kind="approve", message="Send to {{name}}?"), Step(id="s2", kind="back"),
+                     variables=[Variable(name="name")])
+        self.assertEqual(pbk.validate(ok), [])
+        for msg in ("Send to {{nope}}?", "Use <secret>pw</secret>?"):
+            self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve", message=msg), Step(id="s2", kind="back"))), msg)
+
+    def test_the_wait_is_bounded(self):
+        for bad in (0, 4, 7 * 24 * 60 + 1, -5):
+            with self.assertRaises(Exception):
+                Step(id="s1", kind="approve", message="m", timeout_minutes=bad)
+        self.assertEqual(Step(id="s1", kind="approve", message="m").timeout_minutes, None)     # the default is applied at run time
+        self.assertEqual(pbk.DEFAULT_APPROVAL_MINUTES, 1440)
+
+    def test_other_kinds_cannot_carry_a_timeout_and_approve_carries_nothing_else(self):
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="back", timeout_minutes=60))))
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve", message="m", url="https://a.com"), Step(id="s2", kind="back"))))
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve", message="m", target=self.fp), Step(id="s2", kind="back"))))
+
+    def test_guarding(self):
+        pb = self.pb(Step(id="s1", kind="open", url="https://a.com/"), Step(id="s2", kind="click", target=self.fp, ask=True),
+                     Step(id="s3", kind="approve", message="m"), Step(id="s4", kind="click", target=self.fp, ask=True))
+        self.assertFalse(pbk.guarded_by_checkpoint(pb, 1))
+        self.assertTrue(pbk.guarded_by_checkpoint(pb, 3))
+        self.assertFalse(pbk.guarded_by_checkpoint(pb, 0))
+        self.assertEqual(pbk.unguarded_ask_steps(pb), [2])                      # step 4 is guarded, step 2 is not
+
+    def test_a_checkpoint_two_steps_before_does_not_guard(self):
+        pb = self.pb(Step(id="s1", kind="approve", message="m"), Step(id="s2", kind="wait", seconds=1),
+                     Step(id="s3", kind="click", target=self.fp, ask=True))
+        self.assertEqual(pbk.unguarded_ask_steps(pb), [3])
+
+    def test_removing_or_adding_a_checkpoint_changes_what_was_approved(self):
+        with_cp = pbk.with_approval(pbk.refresh(self.pb(Step(id="s1", kind="approve", message="m"),
+                                                         Step(id="s2", kind="click", target=self.fp, ask=True))))
+        without = with_cp.model_copy(update={"steps": with_cp.steps[1:]})
+        self.assertFalse(pbk.is_approved(without))
+        reworded = with_cp.model_copy(update={"steps": [with_cp.steps[0].model_copy(update={"timeout_minutes": 10}), with_cp.steps[1]]})
+        self.assertFalse(pbk.is_approved(reworded))                              # a shorter wait is a different promise
+
+
 class HashesAreText(unittest.TestCase):
     def test_a_64_bit_hash_survives_a_trip_through_javascript(self):
         import json

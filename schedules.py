@@ -72,12 +72,31 @@ class BatchResult(BaseModel):
     detail: str = Field(default="", max_length=300)
 
 
+class ParkedRun(BaseModel):
+    """A run that stopped at an approve step because nobody was there, waiting for the user's answer. It holds
+    everything needed to run again from the top once they say yes (the browser is free in the meantime)."""
+    model_config = ConfigDict(extra="forbid")
+    row: int
+    run_id: str
+    step_id: str                                              # the approve step it is waiting at
+    message: str = Field(default="", max_length=500)
+    detail: str = Field(default="", max_length=600)           # e.g. exactly what was typed and would be sent
+    url: str = Field(default="", max_length=300)
+    parked_at: str = ""
+    expires_at: str = ""                                      # no answer by then means NO: the run is cancelled
+    approved: list[str] = Field(default_factory=list)         # approve steps already answered yes in this run
+    values: dict[str, str] = Field(default_factory=dict)      # the inputs it was started with (the answer is for THESE)
+    pb_hash: str = ""                                         # the approved playbook it belongs to (changed = cancelled)
+
+
 class ScheduleState(BaseModel):
     """What the scheduler remembers between ticks (and across a restart of the app)."""
     model_config = ConfigDict(extra="forbid")
     next_run: Optional[str] = None
     queue: list[int] = Field(default_factory=list)            # rows of this batch still to run
     inflight: Optional[int] = None                            # the row being run RIGHT NOW (cleared when it ends)
+    parked: list[ParkedRun] = Field(default_factory=list)     # runs waiting for the user's answer
+    resume: list[ParkedRun] = Field(default_factory=list)     # answered yes: run again when it is their turn
     batch_id: str = ""
     batch_started: Optional[str] = None
     batch_results: list[BatchResult] = Field(default_factory=list)
@@ -200,11 +219,13 @@ def unattended_problems(pb: Playbook, allow_sensitive: bool = False) -> list[str
     if not pbk.is_approved(pb):
         out.append("Approve the playbook first (open it with Edit and tick the approval). "
                    "A scheduled run only does what you approved.")
-    risky = [n for n, s in enumerate(pb.steps, start=1) if s.ask]
+    # A send guarded by an approve step (the user is asked every time) needs no blanket permission.
+    risky = pbk.unguarded_ask_steps(pb)
     if risky and not allow_sensitive:
         which = ", ".join(str(n) for n in risky[:5])
         out.append(f"Step{'s' if len(risky) > 1 else ''} {which} send{'' if len(risky) > 1 else 's'} something, "
-                   "post, or can't be undone. Tick \"let these steps run while I'm away\" to schedule it.")
+                   "post, or can't be undone. Add an \"ask me first\" step before "
+                   f"{'each' if len(risky) > 1 else 'it'}, or tick \"let these steps run while I'm away\" to schedule it.")
     for n, s in enumerate(pb.steps, start=1):
         if s.kind == "handoff":
             out.append(f"Step {n} asks you to do something by hand, so it can't run while you are away.")

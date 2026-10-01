@@ -34,15 +34,18 @@ MAX_ATTR_VALUE = 300
 # Step kinds this version can store. A kind in the roadmap that is not here yet (repeat, if,
 # checkpoint, run_playbook) is rejected rather than stored half-understood.
 KINDS = ("open", "search", "back", "click", "type", "select", "key", "scroll", "wait", "tab", "handoff",
-         "extract", "ai")
+         "approve", "extract", "ai")
 AI_KINDS = ("extract", "ai")           # these need a model; every other kind replays without one
 VAR_TYPES = ("text", "number", "url", "linkedin_url")
 _FIELDS_USED = {                        # which optional fields each kind may carry
     "open": {"url"}, "search": {"query", "engine"}, "back": set(), "click": {"target"},
     "type": {"target", "text"}, "select": {"target", "text"}, "key": {"keys"}, "scroll": {"target"},
-    "wait": {"seconds"}, "tab": {"tab_index"}, "handoff": {"message"}, "extract": {"query"}, "ai": {"query"},
+    "wait": {"seconds"}, "tab": {"tab_index"}, "handoff": {"message"}, "approve": {"message", "timeout_minutes"},
+    "extract": {"query"}, "ai": {"query"},
 }
-_CHECKED_FIELDS = ("url", "target", "text", "keys", "seconds", "query", "engine", "message", "tab_index")
+_CHECKED_FIELDS = ("url", "target", "text", "keys", "seconds", "query", "engine", "message", "tab_index",
+                   "timeout_minutes")
+DEFAULT_APPROVAL_MINUTES = 24 * 60
 
 # Search engines a `search` step can use. The address is built here from the engine and the
 # (URL-encoded) query, so a search value can never change which site is visited.
@@ -112,7 +115,7 @@ class Step(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     kind: Literal["open", "search", "back", "click", "type", "select", "key", "scroll", "wait", "tab",
-                  "handoff", "extract", "ai"]
+                  "handoff", "approve", "extract", "ai"]
     tag: Literal["deterministic", "ai"] = "deterministic"
     note: str = Field(default="", max_length=300)           # plain words: what this step does
     url: Optional[str] = None
@@ -129,6 +132,9 @@ class Step(BaseModel):
     message: Optional[str] = Field(default=None, max_length=500)      # what the user is asked to do (handoff)
     tab_index: Optional[int] = Field(default=None, ge=0, le=30)       # which open tab, counting from 0 (tab step)
     close_tab: bool = False                                          # tab step: close it instead of switching to it
+    # approve step: how long to wait for the user's answer when nobody is there (default one day). No answer
+    # in time means NO: the run is cancelled, never carried on.
+    timeout_minutes: Optional[int] = Field(default=None, ge=5, le=7 * 24 * 60)
     ask: bool = False        # reaches other people or can't be undone: needs the user's approval
     check: Optional[Check] = None
 
@@ -260,7 +266,7 @@ def validate(pb: Playbook) -> list[str]:
         problems += [f"variable '{v.name}': {p}" for p in map(host_problem, v.allowed_hosts) if p]
 
     seen: set[str] = set()
-    for s in pb.steps:
+    for n, s in enumerate(pb.steps, start=1):
         where = f"step {s.id}"
         if not STEP_ID_RE.fullmatch(s.id):
             problems.append(f"{where}: bad step id")
@@ -284,15 +290,18 @@ def validate(pb: Playbook) -> list[str]:
         need = {"open": ("url", s.url), "search": ("query", s.query), "click": ("target", s.target),
                 "type": ("target", s.target), "select": ("target", s.target), "key": ("keys", s.keys),
                 "wait": ("seconds", s.seconds), "tab": ("tab_index", s.tab_index),
-                "handoff": ("message", s.message), "extract": ("query", s.query), "ai": ("query", s.query)}
+                "handoff": ("message", s.message), "approve": ("message", s.message),
+                "extract": ("query", s.query), "ai": ("query", s.query)}
         if s.kind in need and need[s.kind][1] is None:
             problems.append(f"{where}: a {s.kind} step needs '{need[s.kind][0]}'")
         if s.kind == "search" and s.engine is None:
             problems.append(f"{where}: a search step needs an 'engine'")
         if s.kind == "search" and not (s.query or "").strip():
             problems.append(f"{where}: a search step needs something to search for")
-        if s.kind == "handoff" and not (s.message or "").strip():
-            problems.append(f"{where}: a handoff step needs a message for the user")
+        if s.kind in ("handoff", "approve") and not (s.message or "").strip():
+            problems.append(f"{where}: a {s.kind} step needs a message for the user")
+        if s.kind == "approve" and n == len(pb.steps):
+            problems.append(f"{where}: an approve step must come BEFORE the step it guards, so it can't be last")
         if s.kind in ("type", "select") and s.text is None:
             problems.append(f"{where}: a {s.kind} step needs 'text'")
 
@@ -311,8 +320,9 @@ def validate(pb: Playbook) -> list[str]:
         problems += _check_placeholders(f"{where} text", s.text, variables, allow_secret=s.kind == "type")
         problems += _check_placeholders(f"{where} keys", s.keys, variables, allow_secret=False)
         problems += _check_placeholders(f"{where} query", s.query, variables, allow_secret=False)
-        # a message is shown to the user as written: variables are not filled into it
-        problems += _check_placeholders(f"{where} message", s.message, {}, allow_secret=False)
+        # A handoff message is shown as written; an approve message may use the run's inputs ("Send to {{name}}?")
+        problems += _check_placeholders(f"{where} message", s.message, variables if s.kind == "approve" else {},
+                                        allow_secret=False)
     return problems
 
 
@@ -359,6 +369,18 @@ def is_approved(pb: Playbook) -> bool:
 
 def with_approval(pb: Playbook) -> Playbook:
     return pb.model_copy(update={"approval": Approval(hash=approval_hash(pb), approved_at=_now())})
+
+
+def guarded_by_checkpoint(pb: Playbook, index: int) -> bool:
+    """Is the step at this position (0-based) directly preceded by an approve step? Then the user is asked
+    before it every time it runs, which is what makes it safe to run while they are away."""
+    return index > 0 and pb.steps[index - 1].kind == "approve"
+
+
+def unguarded_ask_steps(pb: Playbook) -> list[int]:
+    """Positions (1-based) of steps that reach other people or can't be undone and have NO approve step
+    right before them: these only run unattended on the strength of the playbook's own approval."""
+    return [i + 1 for i, s in enumerate(pb.steps) if s.ask and not guarded_by_checkpoint(pb, i)]
 
 
 def ask_steps(pb: Playbook) -> list[Step]:

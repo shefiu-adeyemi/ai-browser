@@ -1178,20 +1178,25 @@ def _count_usage(pb: pbk.Playbook, values: dict) -> None:
         _log.exception("could not count a run toward the daily limits")
 
 
-async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, schedule: Schedule, row: int) -> SchedOutcome:
-    """A scheduled run: nobody is there, so nothing is asked (a step that needs approval stops the run).
-    It leaves the user's chat alone; the record and the inbox are where it is reported."""
+async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, schedule: Schedule, row: int,
+                                  approved: frozenset = frozenset()) -> SchedOutcome:
+    """A scheduled run: nobody is there, so nothing is asked. A step that needs approval stops the run, and an
+    approve step PARKS it (the question goes to the inbox; `approved` carries the answers already given when it
+    is run again). It leaves the user's chat alone; the record and the inbox are where it is reported."""
     record = {"run_id": run_id, "playbook_version": pb.version, "started_at": datetime.now().timestamp(),
               "attended": False, "schedule_id": schedule.id, "row": row, "inputs": values, "status": "failed",
-              "error": "", "steps": [], "outputs": [], "seconds": 0.0, "finished_at": 0.0}
+              "error": "", "steps": [], "outputs": [], "seconds": 0.0, "finished_at": 0.0,
+              "answered": sorted(approved)}
     try:
         await _broadcast({"type": "status", "text": "running"})
         await _broadcast({"type": "action", "text": f"⏰ Scheduled: {schedule.name} (row {row + 1} of {len(schedule.items)})"})
         player = await _build_player(pb, attended=False)
-        result = await player.run(pb, values)
+        result = await player.run(pb, values, approved=set(approved))
+        if result.waiting:
+            record["waiting"] = result.waiting
         _save_run_record(pb, record, result.status, result.error, result)
-        await _broadcast({"type": "status", "text": "done" if result.status == "done" else "error"})
-        return SchedOutcome(result.status, run_id, result.error)
+        await _broadcast({"type": "status", "text": "done" if result.status in ("done", "waiting") else "error"})
+        return SchedOutcome(result.status, run_id, result.error, waiting=result.waiting)
     except asyncio.CancelledError:
         _save_run_record(pb, record, "stopped", "Stopped by you.")
         await _broadcast({"type": "status", "text": "idle"})
@@ -1427,7 +1432,7 @@ async def _notify_user(level: str, title: str, text: str = "", **ids) -> None:
     """Put it in the inbox, tell any open window, and (for things that need attention) pop a desktop toast."""
     try:
         item = _notifications.add(level, title, text, **{k: v for k, v in ids.items()
-                                                         if k in ("schedule_id", "playbook_id", "run_id")})
+                                                         if k in ("schedule_id", "playbook_id", "run_id", "action")})
     except Exception:
         _log.exception("could not store a notification")
         return
@@ -1436,13 +1441,15 @@ async def _notify_user(level: str, title: str, text: str = "", **ids) -> None:
         _desktop.notify(title, text)                       # in quiet hours the inbox still records it, silently
 
 
-async def _execute_scheduled(pb: pbk.Playbook, values: dict, schedule: Schedule, row: int) -> SchedOutcome:
-    """Hand one row to the same single-run slot a manual task uses, and wait for how it ended."""
-    run_id = RunStore.new_id()
+async def _execute_scheduled(pb: pbk.Playbook, values: dict, schedule: Schedule, row: int,
+                             approved: frozenset = frozenset(), run_id: str | None = None) -> SchedOutcome:
+    """Hand one row to the same single-run slot a manual task uses, and wait for how it ended. A run the user
+    has answered is run again under its own run id (so it is one entry in the history, not two)."""
+    run_id = run_id or RunStore.new_id()
     done: asyncio.Future = asyncio.get_running_loop().create_future()
 
     async def job() -> None:
-        outcome = await run_playbook_unattended(pb, values, run_id, schedule, row)
+        outcome = await run_playbook_unattended(pb, values, run_id, schedule, row, approved)
         if not done.done():
             done.set_result(outcome)
 
@@ -1469,9 +1476,23 @@ def _scheduler_idle() -> bool:
     return not _user_is_busy()
 
 
+def _record_parked_end(schedule: Schedule, job, status: str, detail: str) -> None:
+    """A parked run was answered no, ran out of time or was cancelled: say so in its record, so the history
+    does not show it as waiting for ever."""
+    try:
+        rec = _runs.get(schedule.playbook_id, job.run_id)
+        if rec is None:
+            return
+        rec.update(status=status, error=detail[:300], finished_at=datetime.now().timestamp())
+        rec.pop("waiting", None)
+        _runs.save(schedule.playbook_id, rec)
+    except Exception:
+        _log.exception("could not update the record of a parked run")
+
+
 _scheduler = Scheduler(schedules=_schedules, playbooks=_playbooks, limits=_limits, execute=_execute_scheduled,
                        idle=_scheduler_idle, notify=_notify_user,
-                       maintenance=_scheduler_housekeeping)
+                       maintenance=_scheduler_housekeeping, resolved=_record_parked_end)
 
 
 def _schedule_status(s: Schedule, now: datetime) -> str:
@@ -1480,7 +1501,9 @@ def _schedule_status(s: Schedule, now: datetime) -> str:
         return "paused"
     if not s.enabled:
         return "off"
-    if st.queue:
+    if st.parked:
+        return "asking"                                    # a run is waiting for the user's yes or no
+    if st.queue or st.resume:
         resume = sch.parse_iso(st.resume_after)
         return "waiting" if resume is not None and resume > now else "running"
     return "scheduled" if st.next_run else "finished"
@@ -1496,6 +1519,8 @@ def _schedule_view(s: Schedule, names: dict[str, str]) -> dict:
         "last_status": st.last_status, "last_detail": st.last_detail, "paused_reason": st.paused_reason,
         "paused_detail": st.paused_detail, "missed": st.missed, "runs_total": st.runs_total,
         "remaining": len(st.queue), "resume_after": st.resume_after,
+        "pending": [{"run_id": p.run_id, "row": p.row, "message": p.message, "detail": p.detail, "url": p.url,
+                     "parked_at": p.parked_at, "expires_at": p.expires_at} for p in st.parked],
     }
 
 
@@ -1566,7 +1591,25 @@ def _schedule_id_or_error(sid: str) -> JSONResponse | None:
 async def delete_schedule(sid: str):
     if (bad := _schedule_id_or_error(sid)) is not None:
         return bad
-    return {"ok": True, "deleted": _schedules.delete(sid)}
+    s = _schedules.get(sid)
+    deleted = _schedules.delete(sid)
+    if s is not None:                                      # whatever was waiting for a yes can never run now
+        for job in [*s.state.parked, *s.state.resume]:
+            _record_parked_end(s, job, "cancelled", "The schedule was deleted, so this did not run.")
+    return {"ok": True, "deleted": deleted}
+
+
+@app.post("/schedules/{sid}/checkpoints/{rid}/answer")
+async def answer_checkpoint(sid: str, rid: str, body: dict):
+    """The user's yes or no to a run that is waiting at an approve step. Only a real true is a yes."""
+    if (bad := _schedule_id_or_error(sid)) is not None:
+        return bad
+    if not RunStore.is_valid_id(rid):
+        return _pb_error(400, "invalid run id")
+    why = await _scheduler.answer(sid, rid, body.get("approve") is True)
+    if not why:
+        return {"ok": True}
+    return _pb_error(404 if "no longer exists" in why else 409, why)
 
 
 @app.post("/schedules/pause-all")

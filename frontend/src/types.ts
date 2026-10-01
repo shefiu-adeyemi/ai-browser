@@ -108,7 +108,7 @@ export interface PlaybookFingerprint {
 
 export interface PlaybookStep {
   id: string
-  kind: 'open' | 'search' | 'back' | 'click' | 'type' | 'select' | 'key' | 'scroll' | 'wait' | 'tab' | 'handoff' | 'extract' | 'ai'
+  kind: 'open' | 'search' | 'back' | 'click' | 'type' | 'select' | 'key' | 'scroll' | 'wait' | 'tab' | 'handoff' | 'approve' | 'extract' | 'ai'
   tag: 'deterministic' | 'ai'
   note: string
   url?: string | null
@@ -120,6 +120,7 @@ export interface PlaybookStep {
   message?: string | null
   tab_index?: number | null
   close_tab?: boolean
+  timeout_minutes?: number | null
   ask: boolean
   target?: PlaybookFingerprint | null
   [more: string]: unknown        // fields the screen doesn't show are passed back to the server untouched
@@ -233,7 +234,7 @@ export interface ScheduleView {
   items: Record<string, string>[]
   on_failure: 'stop' | 'skip'
   allow_sensitive: boolean
-  status: 'scheduled' | 'running' | 'waiting' | 'paused' | 'off' | 'finished'
+  status: 'scheduled' | 'running' | 'waiting' | 'asking' | 'paused' | 'off' | 'finished'
   next_run: string | null
   last_run_at: string | null
   last_status: string
@@ -244,6 +245,17 @@ export interface ScheduleView {
   runs_total: number
   remaining: number
   resume_after: string | null
+  pending: PendingQuestion[]
+}
+
+export interface PendingQuestion {
+  run_id: string
+  row: number
+  message: string
+  detail: string
+  url: string
+  parked_at: string
+  expires_at: string
 }
 
 export interface Allowance { start: number; ceiling: number; ramp_per_week: number }
@@ -266,4 +278,5 @@ export interface NotificationItem {
   playbook_id: string
   run_id: string
   read: boolean
+  action?: { type: 'checkpoint'; schedule_id: string; run_id: string } | null
 }
