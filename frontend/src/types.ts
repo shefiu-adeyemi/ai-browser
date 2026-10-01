@@ -200,6 +200,7 @@ export interface PlaybookStepResult {
 }
 
 export interface PlaybookRunRecord extends Omit<PlaybookRunSummary, 'steps' | 'ok_steps'> {
+  screenshot?: boolean
   inputs: Record<string, string>
   steps: PlaybookStepResult[]
   outputs: { step_id: string; query: string; text: string }[]
@@ -246,6 +247,8 @@ export interface ScheduleView {
 }
 
 export interface Allowance { start: number; ceiling: number; ramp_per_week: number }
+
+export interface QuietHours { enabled: boolean; start: string; end: string }
 
 export interface LimitsInfo {
   allowances: Record<string, Allowance>

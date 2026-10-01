@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Pause, Pencil, Play, PlayCircle, Trash2 } from 'lucide-react'
-import type { LimitsInfo, ScheduleView } from '@/types'
+import type { LimitsInfo, QuietHours, ScheduleView } from '@/types'
 import { errText, formatWhen, readJson, reasonOf } from './shared'
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -37,6 +37,7 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
   const [rows, setRows] = useState<ScheduleView[] | null>(null)
   const [pausedAll, setPausedAll] = useState(false)
   const [limits, setLimits] = useState<LimitsInfo | null>(null)
+  const [quiet, setQuiet] = useState<QuietHours>({ enabled: false, start: '22:00', end: '07:00' })
   const [problem, setProblem] = useState('')
   const [error, setError] = useState('')
   const [confirming, setConfirming] = useState<string | null>(null)
@@ -50,6 +51,7 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
       setRows(data.schedules)
       setPausedAll(data.paused_all)
       setLimits(data.limits)
+      if (data.quiet_hours) setQuiet(data.quiet_hours)
       setProblem(data.problem || '')
       setError('')
     } catch (e) {
@@ -78,6 +80,20 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
   const post = (url: string, body: unknown = {}, done?: string) =>
     call(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, done)
 
+  const [checking, setChecking] = useState(false)
+  const checkSignIn = async () => {
+    setChecking(true)
+    try {
+      const res = await fetch('/session/check-linkedin', { method: 'POST' })
+      const data = await readJson(res)
+      if (!res.ok || !data.ok) { setError(reasonOf(res, data)); return }
+      setError('')
+      notify(data.message)
+    } catch (e) {
+      setError(errText(e))
+    } finally { setChecking(false) }
+  }
+
   const toggle = (s: ScheduleView) =>
     post('/schedules', { schedule: { ...s, enabled: !s.enabled } }, s.enabled ? `Switched off "${s.name}".` : `Switched on "${s.name}".`)
 
@@ -88,7 +104,13 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
           <input type="checkbox" checked={pausedAll} onChange={(e) => post('/schedules/pause-all', { paused: e.target.checked })} />
           Pause all schedules
         </label>
-        <button onClick={onNew} className="flex-shrink-0 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white">New schedule</button>
+        <div className="flex flex-shrink-0 items-center gap-2">
+          <button onClick={checkSignIn} disabled={checking} className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            title="Opens LinkedIn in the browser and looks whether you are signed in">
+            {checking ? 'Checking…' : 'Check LinkedIn sign-in'}
+          </button>
+          <button onClick={onNew} className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white">New schedule</button>
+        </div>
       </div>
       {pausedAll && <p className="mx-5 mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">Nothing runs by itself while this is ticked.</p>}
       {problem && <p role="alert" className="mx-5 mb-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{problem}</p>}
@@ -144,8 +166,10 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
           })}
         </ul>
 
+        <QuietHoursBox quiet={quiet} onChange={(q) => post('/scheduler/quiet-hours', q, q.enabled ? 'Quiet hours are on.' : 'Quiet hours are off.')} />
+
         {limits && (
-          <div className="mt-5 rounded-xl bg-gray-50 p-3">
+          <div className="mt-3 rounded-xl bg-gray-50 p-3">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs font-medium text-gray-700">Daily limits (protect your account)</p>
               <button onClick={() => setEditingLimits(!editingLimits)} className="text-xs text-brand">{editingLimits ? 'Close' : 'Change'}</button>
@@ -159,6 +183,28 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
             {editingLimits && <LimitsEditor limits={limits} onSaved={(l) => { setLimits(l); setEditingLimits(false); notify('Saved the limits.') }} />}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function QuietHoursBox({ quiet, onChange }: { quiet: QuietHours; onChange: (q: QuietHours) => void }) {
+  const [start, setStart] = useState(quiet.start)
+  const [end, setEnd] = useState(quiet.end)
+  useEffect(() => { setStart(quiet.start); setEnd(quiet.end) }, [quiet.start, quiet.end])
+  const apply = (next: Partial<QuietHours>) => onChange({ enabled: quiet.enabled, start, end, ...next })
+  return (
+    <div className="mt-5 rounded-xl bg-gray-50 p-3">
+      <label className="flex items-center gap-2 text-xs font-medium text-gray-700">
+        <input type="checkbox" checked={quiet.enabled} onChange={(e) => apply({ enabled: e.target.checked })} />
+        Quiet hours
+      </label>
+      <p className="mt-0.5 text-[11px] text-gray-400">Nothing starts by itself and no desktop pop-ups appear. Due runs wait, and the inbox still records everything.</p>
+      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+        from <input type="time" aria-label="Quiet hours start" value={start} onChange={(e) => setStart(e.target.value)} onBlur={() => start !== quiet.start && apply({ start })}
+          className="rounded-md border border-gray-300 px-2 py-1" />
+        to <input type="time" aria-label="Quiet hours end" value={end} onChange={(e) => setEnd(e.target.value)} onBlur={() => end !== quiet.end && apply({ end })}
+          className="rounded-md border border-gray-300 px-2 py-1" />
       </div>
     </div>
   )

@@ -122,6 +122,21 @@ class ScheduledRuns(LifecycleBase):
         self.assertEqual([m for m in self.ws.msgs if m["type"] == "approval"], [], "an unattended run must never ask")
         self.assertEqual(len([m for m in self.ws.msgs if m["type"] == "notification"]), 1)
 
+    async def test_a_scheduled_run_that_stops_keeps_a_real_picture_of_the_page(self):
+        from playbook_player import PlaybookPlayer as _PP
+        ghost = pbk.Fingerprint(node_name="button", ax_name="Not on this page", x_path="/nope", element_hash="1", stable_hash="2")
+        pb = self.pbs.save(pbk.refresh(pbk.Playbook(name="Click a ghost", steps=[
+            pbk.Step(id="s1", kind="open", url=self.url), pbk.Step(id="s2", kind="click", target=ghost)])), approve=True)
+        self.schedule(pb)
+        quick = lambda *a, **k: _PP(*a, find_timeout=1.0, **k)                # do not wait the full 10 s
+        with mock.patch.object(agent_ui, "PlaybookPlayer", quick):
+            rec = await self.finished_run(pb)
+        self.assertEqual(rec["status"], "failed", rec)
+        self.assertTrue(rec["screenshot"])
+        data = self.runs.screenshot(pb.id, rec["run_id"])
+        self.assertTrue(data and data[:2] == b"\xff\xd8", "a JPEG of the page")
+        self.assertLess(len(data), 400_000)
+
     async def test_a_user_task_in_progress_is_not_interrupted(self):
         pb = self.pbs.save(pbk.refresh(pbk.Playbook(name="Open the form", steps=[
             pbk.Step(id="s1", kind="open", url=self.url)])), approve=True)

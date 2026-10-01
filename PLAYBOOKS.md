@@ -202,3 +202,32 @@ Behaviour (all from the approved policy):
 Not built / known limits: no quiet hours; a daily time that falls in the hour a clock change skips counts as
 missed; the batch continues after an app restart (it is not "missed"); the app must be running (no background
 service); the Windows toast could not be seen from here, only sent without error (a test toast was sent).
+
+
+## Phase 3 review and MVP pass (built and tested)
+Review fixes:
+- **No double sends after a crash.** A row is marked "in flight" before it runs. If the app dies mid-row, the
+  row is NOT run again after a restart: it is reported ("may or may not have finished"), counted toward the
+  daily allowance, and the schedule's own failure choice decides what happens next.
+- **No stale batches.** A batch that waited more than 12 hours (and is not held for a daily allowance) is
+  dropped as a missed run instead of starting late.
+- The scheduler's wait reasons are a field (`Decision.kind`), not a word searched for in a sentence; a failing
+  notification can no longer undo or stop the scheduler's bookkeeping.
+
+MVP limits fixed:
+- **Quiet hours** (default off, e.g. 22:00-07:00): nothing starts, no desktop pop-ups; due runs wait and the
+  inbox still records everything.
+- **Failure report with a picture:** when a run stops, a small JPEG of the page is kept with the run record
+  (deleted with it), shown in Run history with the step-by-step account, a "Scheduled" badge and an
+  "Edit the playbook" button.
+- **"Did you mean...?"**: a step that can't find its element now says what page it is on and which elements
+  look closest (or that nothing does, so check it is the right page).
+- **Templates:** one click creates an UNAPPROVED playbook (open a LinkedIn profile; search the web) and opens it
+  for review. A template is never pre-approved.
+- **Results download:** "Download results (CSV)" in Run history: one row per run with its inputs and what it
+  read; formula-looking cells are neutralised.
+- **LinkedIn sign-in check** button in Schedules: opens the feed and says whether the browser is signed in.
+
+Still limits for after the MVP: general AI steps; self-repair of a broken step (the report now helps a
+person fix it); checkpoints/approvals answered from the inbox; a background service so schedules run with the
+app closed; a daily time inside a clock-change hour counts as missed.

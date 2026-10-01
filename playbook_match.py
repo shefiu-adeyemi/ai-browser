@@ -24,6 +24,7 @@ only auto-approved when the element found is a HIGH confidence match for the one
 """
 
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 
@@ -94,6 +95,23 @@ def _attribute_score(fp: Fingerprint, c: Candidate) -> int:
         if key in fp.attributes and key in c.attributes:
             score += 1 if _same(key, fp.attributes[key], c.attributes[key]) else -2
     return score
+
+
+def closest(fp: Fingerprint, candidates: Iterable[Candidate], limit: int = 3) -> list[Candidate]:
+    """The elements on the page that look most like the one that was recorded, best first. Used to help a
+    person fix a playbook whose element can't be found ("did you mean ...?"), never to click anything."""
+    scored: list[tuple[float, Candidate]] = []
+    want = (fp.ax_name or "").strip().lower()
+    for c in candidates:
+        if fp.node_name and c.node_name != fp.node_name:
+            continue
+        name = (c.ax_name or "").strip().lower()
+        similarity = SequenceMatcher(None, want, name).ratio() if want and name else 0.0
+        score = similarity + 0.25 * max(0, _attribute_score(fp, c))
+        if score >= 0.5 and (name or c.attributes):
+            scored.append((score, c))
+    scored.sort(key=lambda p: -p[0])
+    return [c for _score, c in scored[:limit]]
 
 
 def find(fp: Fingerprint, candidates: Iterable[Candidate]) -> Optional[Match]:

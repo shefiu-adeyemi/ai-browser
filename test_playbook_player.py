@@ -274,6 +274,28 @@ class Finding(PlayerCase):
         self.assertGreaterEqual(self.clock.now, 10)
         self.assertEqual([a[0] for a in page.actions], ["navigate"])
 
+    async def test_a_miss_says_where_it_is_and_what_looks_closest(self):
+        page = self.build([el(1, "Messaging", h=9), el(2, "Home", h=8)], url="https://a.com/profile")
+        r = await self.run_pb(make_pb([S(1, "click", target=fp("Message", h=1))]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("Couldn't find Message on the page.", r.error)
+        self.assertIn("The page is a.com. The closest elements on it: \"Messaging\".", r.error)
+
+    async def test_a_miss_on_a_page_with_nothing_alike_says_to_check_the_page(self):
+        page = self.build([el(1, "Totally different", h=9)], url="https://b.com/")
+        r = await self.run_pb(make_pb([S(1, "click", target=fp("Message", h=1))]))
+        self.assertIn("nothing on it looks like that element", r.error)
+        self.assertIn("b.com", r.error)
+
+    async def test_a_failure_while_hinting_still_reports_the_miss(self):
+        self.build([], url="https://a.com/")
+        from unittest import mock
+        with mock.patch("playbook_player.closest", side_effect=RuntimeError("page closed")):
+            r = await self.run_pb(make_pb([S(1, "click", target=fp("Message", h=1))]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("Couldn't find Message on the page.", r.error)
+        self.assertNotIn("Unexpected error", r.error)
+
     async def test_an_element_that_appears_late_is_waited_for(self):
         page = self.build([])
         polls = {"n": 0}

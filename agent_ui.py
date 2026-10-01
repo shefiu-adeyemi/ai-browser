@@ -15,6 +15,7 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Set
+from urllib.parse import urlparse
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -34,8 +35,10 @@ from chat_store import ChatStore
 from live_view import LiveView
 import playbook as pbk
 from playbook_recorder import draft_from_history
-from playbook_player import PlaybookPlayer, SessionDriver, StepApprover, summarize
-from playbook_runs import RunStore
+from playbook_player import PlaybookPlayer, SessionDriver, StepApprover, summarize, _LOGIN_PATH
+import playbook_templates
+from results_export import runs_to_csv
+from playbook_runs import KEEP_PER_PLAYBOOK as RunStore_KEEP, RunStore
 from playbook_store import PlaybookConflict, PlaybookInvalid, PlaybookNotFound, PlaybookStore
 import schedules as sch
 from notifications import DesktopNotifier, NotificationStore
@@ -1235,6 +1238,26 @@ async def draft_playbook():
     return {"ok": True, **draft.to_dict()}
 
 
+@app.get("/playbooks/templates")
+async def playbook_templates_list():
+    return {"ok": True, "templates": playbook_templates.list_templates()}
+
+
+@app.post("/playbooks/from-template")
+async def playbook_from_template(body: dict):
+    """Create a ready-made playbook, UNAPPROVED: the user opens it, reads it and approves it like any other."""
+    try:
+        pb = playbook_templates.build(str(body.get("id", "")))
+    except KeyError:
+        return _pb_error(404, "There is no such template.")
+    try:
+        saved = _playbooks.save(pb)
+    except OSError as e:
+        _log.exception("could not save a template")
+        return _pb_error(500, f"Couldn't write the playbook to disk ({type(e).__name__}: {e}).")
+    return {"ok": True, "playbook": saved.model_dump(mode="json")}
+
+
 @app.post("/playbooks/variable")
 async def playbook_variable(body: dict):
     """Turn one literal value into a variable. Pure: returns the changed playbook, stores nothing."""
@@ -1305,6 +1328,16 @@ async def playbook_runs(pid: str):
     if (bad := _pb_id_or_error(pid)) is not None:
         return bad
     return {"ok": True, "runs": _runs.recent(pid)}
+
+
+@app.get("/playbooks/{pid}/results.csv")
+async def playbook_results_csv(pid: str):
+    """What the playbook's recent runs read, as a spreadsheet: one row per run."""
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    records = [r for row in _runs.recent(pid, limit=RunStore_KEEP) if (r := _runs.get(pid, row["run_id"])) is not None]
+    return Response(content=runs_to_csv(records).encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="results.csv"', "Cache-Control": "no-store"})
 
 
 @app.get("/playbooks/{pid}/runs/{rid}/screenshot")
@@ -1559,6 +1592,31 @@ async def run_schedule_now(sid: str):
         return bad
     why = await _scheduler.run_now(sid)
     return {"ok": True} if not why else _pb_error(409, why)
+
+
+@app.post("/session/check-linkedin")
+async def check_linkedin_session():
+    """Is this browser signed in to LinkedIn? It opens the feed and looks where it ended up. Only when nothing
+    else is using the browser, and only when the user asks."""
+    if _ctl.running or _ctl.paused:
+        return _pb_error(409, "A task is running. Try again when it has finished.")
+    _touch_user()
+    try:
+        session = await _ensure_session()
+        await session.navigate_to("https://www.linkedin.com/feed/")
+        await asyncio.sleep(2.5)
+        url = await session.get_current_page_url()
+    except Exception as e:
+        _log.warning("LinkedIn sign-in check failed: %s", e)
+        return _pb_error(502, f"The browser couldn't open LinkedIn ({str(e)[:150]}).")
+    parsed = urlparse(url or "")
+    if not pbk.host_allowed(parsed.hostname or "", ["linkedin.com"]):
+        return {"ok": True, "signed_in": None, "url": url, "message": "LinkedIn didn't open (the browser ended up somewhere else)."}
+    path = parsed.path or "/"
+    signed_in = path.startswith("/feed") and not _LOGIN_PATH.match(path)
+    return {"ok": True, "signed_in": signed_in, "url": url,
+            "message": "LinkedIn is signed in." if signed_in else
+                       "LinkedIn is not signed in. Sign in in the browser on the left, then check again."}
 
 
 @app.post("/scheduler/quiet-hours")

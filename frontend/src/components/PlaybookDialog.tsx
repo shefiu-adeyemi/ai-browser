@@ -133,8 +133,48 @@ export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props
             onStarted={(name) => { notify(`Running "${name}". Follow it in the chat.`); onClose() }}
           />
         )}
-        {view.kind === 'history' && <History id={view.id} name={view.name} onBack={library} />}
+        {view.kind === 'history' && <History id={view.id} name={view.name} onBack={library} onEdit={() => setView({ kind: 'edit', id: view.id })} />}
       </div>
+    </div>
+  )
+}
+
+// ─── Templates ────────────────────────────────────────────────────────────────
+
+function Templates({ onCreated, onError }: { onCreated: (id: string, name: string) => void; onError: (t: string) => void }) {
+  const [templates, setTemplates] = useState<{ id: string; name: string; description: string }[]>([])
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    fetch('/playbooks/templates').then((r) => (r.ok ? r.json() : null)).then((d) => d?.ok && setTemplates(d.templates)).catch(() => {})
+  }, [])
+
+  const create = async (id: string) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/playbooks/from-template', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
+      })
+      const data = await readJson(res)
+      if (!res.ok || !data.ok) { onError(reasonOf(res, data)); return }
+      onCreated(data.playbook.id, data.playbook.name)
+    } catch (e) {
+      onError(errText(e))
+    } finally { setBusy(false) }
+  }
+
+  if (templates.length === 0) return null
+  return (
+    <div className="mt-4 rounded-xl bg-gray-50 p-3">
+      <p className="text-xs font-medium text-gray-700">Start from a template</p>
+      <ul className="mt-1.5 space-y-1.5">
+        {templates.map((t) => (
+          <li key={t.id} className="flex items-center justify-between gap-3">
+            <div className="min-w-0 text-xs"><p className="text-gray-800">{t.name}</p><p className="text-gray-500">{t.description}</p></div>
+            <button disabled={busy} onClick={() => create(t.id)} className="flex-shrink-0 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50">Use</button>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -257,6 +297,8 @@ function Library({ canSave, busy, onSave, onRun, onEdit, onHistory, notify }: {
             </li>
           ))}
         </ul>
+
+        <Templates onCreated={(id, name) => { notify(`Created "${name}". Read it, then approve it.`); onEdit(id) }} onError={setError} />
 
         {damaged.length > 0 && (
           <div className="mt-4">

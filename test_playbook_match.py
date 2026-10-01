@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace as NS
 
 from playbook import Fingerprint
-from playbook_match import Candidate, candidates_from_selector_map, find
+from playbook_match import Candidate, candidates_from_selector_map, closest, find
 
 
 def cand(i, node="button", ax=None, attrs=None, xp=None, h=None, sh=None):
@@ -105,6 +105,31 @@ class Safety(unittest.TestCase):
                  [cand(1, ax="Message Bob", attrs={"aria-label": "Message", "role": "button"}),
                   cand(2, ax="Connect", attrs={"aria-label": "Connect", "role": "button"})])
         self.assertEqual((m.index, m.level), (1, "attributes"))
+
+
+class Closest(unittest.TestCase):
+    def test_the_most_similar_names_come_first(self):
+        near = closest(fp(ax="Message"), [cand(1, ax="Connect"), cand(2, ax="Messaging"), cand(3, ax="Message Jane"),
+                                          cand(4, ax="Home")])
+        self.assertEqual([c.index for c in near][:2], [2, 3])
+        self.assertNotIn(4, [c.index for c in near])                       # nothing like it
+
+    def test_attributes_count_too(self):
+        near = closest(fp(ax="Send", attrs={"aria-label": "Send message", "role": "button"}),
+                       [cand(1, ax="Post", attrs={"aria-label": "Send message", "role": "button"}), cand(2, ax="Cancel")])
+        self.assertEqual([c.index for c in near], [1])
+
+    def test_only_the_same_kind_of_element(self):
+        self.assertEqual(closest(fp("button", ax="Next"), [cand(1, "a", ax="Next"), cand(2, "div", ax="Next page")]), [])
+
+    def test_limit_and_empty_page(self):
+        many = [cand(i, ax=f"Message {i}") for i in range(10)]
+        self.assertEqual(len(closest(fp(ax="Message"), many)), 3)
+        self.assertEqual(len(closest(fp(ax="Message"), many, limit=5)), 5)
+        self.assertEqual(closest(fp(ax="Message"), []), [])
+
+    def test_a_fingerprint_with_no_name_or_attributes_suggests_nothing(self):
+        self.assertEqual(closest(Fingerprint(node_name="button"), [cand(1, ax="Anything")]), [])
 
 
 class FromSelectorMap(unittest.TestCase):

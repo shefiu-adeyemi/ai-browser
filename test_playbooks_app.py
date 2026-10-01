@@ -10,6 +10,7 @@ from unittest import mock
 import agent_ui
 import playbook as pbk
 from chat_store import ChatStore
+from playbook_runs import RunStore
 from playbook_store import PlaybookStore
 from schedule_store import ScheduleStore
 
@@ -32,6 +33,7 @@ class PlaybookApi(unittest.TestCase):
         self.tmp = pathlib.Path(_tf.mkdtemp())
         self.store = PlaybookStore(self.tmp / "playbooks")
         for p in (mock.patch.object(agent_ui, "_playbooks", self.store),
+                  mock.patch.object(agent_ui, "_runs", RunStore(self.tmp / "runs")),
                   mock.patch.object(agent_ui, "_last_run", None),
                   mock.patch.object(agent_ui, "_schedules", ScheduleStore(self.tmp / "sch.json")),
                   mock.patch.object(agent_ui, "_current_session_id", ChatStore.new_id())):
@@ -202,6 +204,66 @@ class PlaybookApi(unittest.TestCase):
         d = self.draft()
         pb = self.apply(d["playbook"], d["suggestions"][0])
         return self.c.post("/playbooks", json={"playbook": {**pb, "name": name}}).json()["playbook"]
+
+    # ------------------------------------------------------------------------ templates
+    def test_templates_are_listed_and_create_an_unapproved_playbook(self):
+        listed = self.c.get("/playbooks/templates").json()["templates"]
+        self.assertEqual({t["id"] for t in listed}, {"linkedin_profile", "web_search"})
+        r = self.c.post("/playbooks/from-template", json={"id": "linkedin_profile"})
+        self.assertEqual(r.status_code, 200, r.text)
+        pb = r.json()["playbook"]
+        self.assertTrue(pb["id"].startswith("pb_"))
+        self.assertIsNone(pb["approval"])
+        got = self.c.get(f"/playbooks/{pb['id']}").json()
+        self.assertFalse(got["approved"])
+        self.assertEqual(got["playbook"]["variables"][0]["type"], "linkedin_url")
+
+    def test_each_use_of_a_template_is_its_own_playbook(self):
+        a = self.c.post("/playbooks/from-template", json={"id": "web_search"}).json()["playbook"]["id"]
+        b = self.c.post("/playbooks/from-template", json={"id": "web_search"}).json()["playbook"]["id"]
+        self.assertNotEqual(a, b)
+
+    def test_an_unknown_template_and_garbage(self):
+        self.assertEqual(self.c.post("/playbooks/from-template", json={"id": "nope"}).status_code, 404)
+        self.assertEqual(self.c.post("/playbooks/from-template", json={}).status_code, 404)
+        self.assertEqual(self.c.post("/playbooks/from-template", json={"id": ["x"]}).status_code, 404)
+        self.assertEqual(self.store.summaries(), [])
+
+    def test_a_template_cannot_be_run_before_it_is_approved_for_a_schedule(self):
+        pid = self.c.post("/playbooks/from-template", json={"id": "web_search"}).json()["playbook"]["id"]
+        from schedule_store import ScheduleStore
+        body = {"schedule": {"name": "x", "playbook_id": pid, "items": [{"term": "cats"}], "cadence": {"kind": "daily", "at": "09:00"}}}
+        self.assertEqual(self.c.post("/schedules", json=body).status_code, 400)
+
+    def test_templates_need_the_app_cookie(self):
+        from fastapi.testclient import TestClient
+        stranger = TestClient(agent_ui.app, base_url="http://localhost:8000")
+        self.assertIn(stranger.get("/playbooks/templates").status_code, (401, 403))
+        self.assertIn(stranger.post("/playbooks/from-template", json={"id": "web_search"}).status_code, (401, 403))
+
+    # --------------------------------------------------------------------------- results
+    def test_results_download(self):
+        d = self.draft()
+        pb = self.apply(d["playbook"], d["suggestions"][0])
+        saved = self.c.post("/playbooks", json={"playbook": pb}).json()["playbook"]
+        agent_ui._runs.save(saved["id"], {"run_id": RunStore.new_id(), "status": "done", "started_at": 1790000000.0,
+                                          "attended": False, "inputs": {"profile_url": "https://www.linkedin.com/in/jane-doe"},
+                                          "outputs": [{"text": "=HYPERLINK(\"x\")"}], "error": ""})
+        r = self.c.get(f"/playbooks/{saved['id']}/results.csv")
+        self.assertEqual((r.status_code, r.headers["content-type"].split(";")[0]), (200, "text/csv"))
+        self.assertIn('filename="results.csv"', r.headers["content-disposition"])
+        body = r.content.decode("utf-8-sig")
+        self.assertIn("profile_url", body)
+        self.assertIn("scheduled", body)
+        self.assertIn("'=HYPERLINK", body)                               # no live formula
+        self.assertTrue(r.content.startswith(b"\xef\xbb\xbf"))             # Excel reads the accents correctly
+
+    def test_results_for_a_playbook_without_runs_is_just_a_header(self):
+        d = self.draft()
+        saved = self.c.post("/playbooks", json={"playbook": self.apply(d["playbook"], d["suggestions"][0])}).json()["playbook"]
+        body = self.c.get(f"/playbooks/{saved['id']}/results.csv").content.decode("utf-8-sig")
+        self.assertEqual(body.strip().split("\r\n")[0], "Started,Status,How,Result,Error")
+        self.assertEqual(self.c.get("/playbooks/nope/results.csv").status_code, 400)
 
     def test_the_list_includes_damaged_files(self):
         pid = PlaybookStore.new_id()

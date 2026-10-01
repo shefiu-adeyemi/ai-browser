@@ -296,6 +296,55 @@ class Endpoints(Base):
         stranger = TestClient(agent_ui.app, base_url="http://localhost:8000")
         self.assertIn(stranger.get(f"/playbooks/{self.pb.id}/runs/{rid}/screenshot").status_code, (401, 403))
 
+    # ------------------------------------------------------------------ LinkedIn sign-in check
+    def fake_browser(self, ends_at=None, fail=None):
+        class Session:
+            async def navigate_to(inner, url):
+                if fail:
+                    raise fail
+                self.opened = url
+            async def get_current_page_url(inner):
+                return ends_at
+        return mock.patch.object(agent_ui, "_ensure_session", new=mock.AsyncMock(return_value=Session()))
+
+    def check(self, ends_at=None, fail=None):
+        with self.fake_browser(ends_at, fail), mock.patch.object(agent_ui.asyncio, "sleep", new=mock.AsyncMock()):
+            return self.c.post("/session/check-linkedin")
+
+    def test_signed_in(self):
+        r = self.check("https://www.linkedin.com/feed/")
+        self.assertEqual((r.status_code, r.json()["signed_in"]), (200, True))
+        self.assertEqual(self.opened, "https://www.linkedin.com/feed/")
+
+    def test_not_signed_in_wherever_linkedin_sends_you(self):
+        for url in ("https://www.linkedin.com/", "https://www.linkedin.com/authwall?trk=x", "https://www.linkedin.com/login",
+                    "https://www.linkedin.com/checkpoint/challenge/abc", "https://www.linkedin.com/uas/login"):
+            r = self.check(url)
+            self.assertFalse(r.json()["signed_in"], url)
+            self.assertIn("not signed in", r.json()["message"])
+
+    def test_somewhere_else_is_unknown_and_lookalikes_do_not_count(self):
+        for url in ("https://example.com/feed/", "https://evil-linkedin.com/feed/", "https://linkedin.com.evil.net/feed/", ""):
+            self.assertIsNone(self.check(url).json()["signed_in"], url)
+
+    def test_a_browser_error_is_explained(self):
+        r = self.check(fail=RuntimeError("browser died"))
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("browser died", r.json()["reason"])
+
+    def test_not_while_a_task_is_running_and_counts_as_using_the_browser(self):
+        agent_ui._ctl.running = True
+        self.assertEqual(self.check("https://www.linkedin.com/feed/").status_code, 409)
+        agent_ui._ctl.running = False
+        with mock.patch.object(agent_ui, "_last_user_activity", float("-inf")):
+            self.check("https://www.linkedin.com/feed/")
+            self.assertTrue(agent_ui._user_is_busy())
+
+    def test_the_check_needs_the_app_cookie(self):
+        from fastapi.testclient import TestClient
+        stranger = TestClient(agent_ui.app, base_url="http://localhost:8000")
+        self.assertIn(stranger.post("/session/check-linkedin").status_code, (401, 403))
+
     def test_the_inbox(self):
         self.notes.add("error", "Needs you", "sign in")
         self.notes.add("info", "Finished", "ok")

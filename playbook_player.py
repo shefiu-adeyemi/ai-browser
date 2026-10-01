@@ -32,7 +32,7 @@ from urllib.parse import urlparse
 
 import playbook as pbk
 from playbook import Playbook, Step
-from playbook_match import Candidate, Match, candidates_from_selector_map, find
+from playbook_match import Candidate, Match, candidates_from_selector_map, closest, find
 
 MAX_RUN_SECONDS = 900
 MAX_OUTPUT = 20000
@@ -401,7 +401,7 @@ class PlaybookPlayer:
             match = await self._resolve(step)
             if match is None:
                 return StepResult(step.id, step.kind, status="failed",
-                                  detail=f"Couldn't find {_step_target_text(step)} on the page.")
+                                  detail=f"Couldn't find {_step_target_text(step)} on the page." + await self._hint(step))
             self.approver.begin(step.ask and self._preapproved_playbook and match.confidence == "high")
             if step.kind == "click":
                 name, params = "click", {"index": match.index}
@@ -417,6 +417,20 @@ class PlaybookPlayer:
                 continue
             return res
         return res                                                       # pragma: no cover
+
+    async def _hint(self, step: Step) -> str:
+        """After a miss: where the run is, and what on the page looks most like the missing element."""
+        try:
+            host = host_of(await self._safe_url()) or "a blank page"
+            near = closest(step.target, await self.driver.candidates())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return ""
+        names = [f'"{(c.ax_name or c.attributes.get("aria-label") or c.attributes.get("placeholder") or c.node_name)[:50]}"' for c in near]
+        if names:
+            return f" The page is {host}. The closest elements on it: {', '.join(names)}."
+        return f" The page is {host} and nothing on it looks like that element, so check it is the right page."
 
     async def _resolve(self, step: Step) -> Optional[Match]:
         deadline = self._clock() + self.find_timeout
