@@ -93,6 +93,46 @@ class RunStoreTests(unittest.TestCase):
         self.assertFalse((Path(self._tmp.name) / PID).exists())
         self.assertEqual(self.store.delete_playbook_runs(PID), 0)
 
+    def test_a_picture_lives_and_dies_with_its_record(self):
+        a, b = self.store.save(PID, rec(started=1)), self.store.save(PID, rec(started=2))
+        for r in (a, b):
+            self.store.save_screenshot(PID, r["run_id"], b"jpeg-" + r["run_id"].encode())
+        self.assertEqual(self.store.screenshot(PID, a["run_id"]), b"jpeg-" + a["run_id"].encode())
+        self.assertIsNone(self.store.screenshot(PID, "run_" + "0" * 12))
+        files = lambda: sorted(p.name for p in (Path(self._tmp.name) / PID).iterdir())
+        self.assertEqual(len(files()), 4)
+        self.assertEqual(self.store.delete_playbook_runs(PID), 2)
+        self.assertEqual(list((Path(self._tmp.name)).rglob("*.jpg")), [])
+
+    def test_pruning_removes_the_pictures_too(self):
+        ids = []
+        for i in range(8):
+            r = self.store.save(PID, rec(started=i))
+            self.store.save_screenshot(PID, r["run_id"], b"x")
+            os.utime(Path(self._tmp.name) / PID / f"{r['run_id']}.json", (1000 + i, 1000 + i))
+            ids.append(r["run_id"])
+        self.store.save(PID, rec(started=99))                          # triggers pruning down to 5
+        jpgs = {p.stem for p in (Path(self._tmp.name) / PID).glob("*.jpg")}
+        jsons = {p.stem for p in (Path(self._tmp.name) / PID).glob("*.json")}
+        self.assertEqual(jpgs - jsons, set())                          # no picture without its record
+        self.assertLessEqual(len(jsons), 5)
+
+    def test_retention_removes_old_pictures(self):
+        r = self.store.save(PID, rec())
+        self.store.save_screenshot(PID, r["run_id"], b"x")
+        os.utime(Path(self._tmp.name) / PID / f"{r['run_id']}.json", (time.time() - 40 * 86400,) * 2)
+        self.assertEqual(self.store.prune_older_than(30), 1)
+        self.assertEqual(list(Path(self._tmp.name).rglob("*.jpg")), [])
+
+    def test_the_picture_ids_are_checked_too(self):
+        for bad in ("../x", "run_zz", None):
+            with self.assertRaises(ValueError):
+                self.store.save_screenshot(PID, bad, b"x")
+            with self.assertRaises(ValueError):
+                self.store.screenshot(PID, bad)
+        with self.assertRaises(ValueError):
+            self.store.save_screenshot("../x", "run_" + "1" * 12, b"x")
+
     def test_no_temp_files_are_left(self):
         self.store.save(PID, rec())
         self.assertEqual(list(Path(self._tmp.name).rglob("*.tmp")), [])

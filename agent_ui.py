@@ -18,7 +18,7 @@ from typing import Set
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from browser_use import Agent
@@ -37,6 +37,12 @@ from playbook_recorder import draft_from_history
 from playbook_player import PlaybookPlayer, SessionDriver, StepApprover, summarize
 from playbook_runs import RunStore
 from playbook_store import PlaybookConflict, PlaybookInvalid, PlaybookNotFound, PlaybookStore
+import schedules as sch
+from notifications import DesktopNotifier, NotificationStore
+from schedule_store import ScheduleNotFound, ScheduleStore, TooManySchedules
+from schedules import Schedule, ScheduleState, pbk_id_ok
+from scheduler import Outcome as SchedOutcome, Scheduler
+from site_limits import SiteLimits, activities
 from run_outcome import assess, refinement_prompt, should_retry, Outcome
 from task_control import Busy, TaskController
 from browser_nav import BadAddress, Navigator, Busy as NavBusy
@@ -635,10 +641,15 @@ async def _startup() -> None:
     _live = LiveView(lambda: _session, _broadcast, lambda: bool(_clients), _save_last_url)
     _live_task = asyncio.create_task(_live.run())
     asyncio.create_task(_open_start_page())
+    global _scheduler_task
+    if os.getenv("AIBA_NO_SCHEDULER", "").strip() not in ("1", "true", "yes"):
+        _scheduler_task = asyncio.create_task(_scheduler.run_forever())
 
 
 async def _shutdown() -> None:
     """Stop any run and close the browser, so quitting the app leaves no Chromium behind."""
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
     _broker.cancel_all()
     await _ctl.stop()
     if _live_task is not None:
@@ -686,7 +697,22 @@ def _may_browse() -> bool:
     return _ctl.running and bool(pending) and all(p.get("kind") == "handoff" for p in pending)
 
 
+_last_user_activity = float("-inf")           # when the user last used the browser by hand (live view or toolbar)
+USER_QUIET_SECONDS = 60                        # scheduled work waits until they have been still this long
+
+
+def _touch_user() -> None:
+    global _last_user_activity
+    _last_user_activity = time.monotonic()
+
+
+def _user_is_busy() -> bool:
+    """A task is running or paused, or the user is working in the browser by hand right now."""
+    return _ctl.running or _ctl.paused or (time.monotonic() - _last_user_activity) < USER_QUIET_SECONDS
+
+
 async def _nav_call(fn, *args):
+    _touch_user()
     try:
         res = await fn(*args)
     except NavBusy as e:
@@ -848,6 +874,7 @@ async def ws_endpoint(ws: WebSocket):
             try:
                 msg = json.loads(raw)
                 if msg.get("type") == "input" and _live:
+                    _touch_user()
                     _live.enqueue_input(msg)
             except Exception:
                 pass
@@ -1050,6 +1077,47 @@ _playbooks = PlaybookStore(app_paths.PLAYBOOKS_DIR)
 _runs = RunStore(app_paths.PLAYBOOK_RUNS_DIR)
 
 
+async def _build_player(pb: pbk.Playbook, attended: bool) -> PlaybookPlayer:
+    """The player for one run: the shared browser, the guard, and who answers its questions.
+    mode "ask" always: the player's approver decides (a pre-approved step, the user, or - when nobody is
+    there - a refusal), so a hand-edited APPROVAL_MODE can never make a playbook run looser than approved."""
+    session = await _ensure_session()
+    # Tab steps count tabs from the first one, so a playbook that has them starts from a single tab.
+    await trim_tabs(session, keep=1) if any(s.kind == "tab" for s in pb.steps) else await trim_tabs(session)
+    sensitive = linkedin_sensitive_data()
+    approver = StepApprover(_broker, attended=attended)
+    tools = GuardedTools(approver, mode="ask", secret_names={k for v in (sensitive or {}).values() for k in v},
+                         notify=_broadcast, task=pb.name)
+    llm = None
+    if any(s.kind == "extract" for s in pb.steps):
+        try:
+            llm = get_llm()
+        except Exception as e:                  # the step then fails with a clear message
+            _log.warning("no model for a playbook extract step: %s", e)
+
+    async def say(text: str) -> None:
+        await _broadcast({"type": "action", "text": text})
+
+    return PlaybookPlayer(SessionDriver(session, tools, sensitive_data=sensitive, llm=llm), approver, notify=say)
+
+
+def _save_run_record(pb: pbk.Playbook, record: dict, status: str, error: str, result=None) -> None:
+    record.update(status=status, error=error, finished_at=datetime.now().timestamp(),
+                  seconds=round(datetime.now().timestamp() - record["started_at"], 1))
+    if result is not None:
+        record.update(steps=result.to_dict()["steps"], outputs=result.outputs)
+        if result.screenshot:
+            try:
+                _runs.save_screenshot(pb.id, record["run_id"], result.screenshot)
+                record["screenshot"] = True
+            except Exception:
+                _log.exception("could not save the failure picture")
+    try:
+        _runs.save(pb.id, record)
+    except Exception:
+        _log.exception("could not save the run record")
+
+
 async def run_playbook_task(pb: pbk.Playbook, values: dict, run_id: str) -> None:
     """Replay a playbook in the shared browser, in the current chat. Started and stopped only through
     _ctl, like an AI run, so Stop, the live view and the approval prompts all work the same way.
@@ -1064,47 +1132,19 @@ async def run_playbook_task(pb: pbk.Playbook, values: dict, run_id: str) -> None
     record = {"run_id": run_id, "playbook_version": pb.version, "started_at": started.timestamp(),
               "attended": True, "inputs": values, "status": "failed", "error": "", "steps": [],
               "outputs": [], "seconds": 0.0, "finished_at": 0.0}
-
-    def finish_record(status: str, error: str, result=None) -> None:
-        record.update(status=status, error=error, finished_at=datetime.now().timestamp(),
-                      seconds=round(datetime.now().timestamp() - record["started_at"], 1))
-        if result is not None:
-            record.update(steps=result.to_dict()["steps"], outputs=result.outputs)
-        try:
-            _runs.save(pb.id, record)
-        except Exception:
-            _log.exception("could not save the run record")
+    finish_record = lambda status, error, result=None: _save_run_record(pb, record, status, error, result)
 
     try:
         await _broadcast({"type": "status", "text": "running"})
         await _persist()
-        session = await _ensure_session()
-        # Tab steps count tabs from the first one, so a playbook that has them starts from a single tab.
-        await trim_tabs(session, keep=1) if any(s.kind == "tab" for s in pb.steps) else await trim_tabs(session)
-        sensitive = linkedin_sensitive_data()
-        approver = StepApprover(_broker, attended=True)
-        # mode "ask" always: the player's approver decides (pre-approved step, or the user), so a
-        # hand-edited APPROVAL_MODE can never make a playbook run looser than it was approved.
-        tools = GuardedTools(approver, mode="ask",
-                             secret_names={k for v in (sensitive or {}).values() for k in v},
-                             notify=_broadcast, task=pb.name)
-        llm = None
-        if any(s.kind == "extract" for s in pb.steps):
-            try:
-                llm = get_llm()
-            except Exception as e:                  # the step then fails with a clear message
-                _log.warning("no model for a playbook extract step: %s", e)
-
-        async def say(text: str) -> None:
-            await _broadcast({"type": "action", "text": text})
-
-        player = PlaybookPlayer(SessionDriver(session, tools, sensitive_data=sensitive, llm=llm), approver, notify=say)
+        player = await _build_player(pb, attended=True)
         result = await player.run(pb, values)
         text = summarize(pb, result)
         _conversation_history.append({"role": "agent", "content": text, "ts": datetime.now().strftime("%H:%M")})
         verdict = "pass" if result.status == "done" else "fail"
         await _persist(verdict=verdict, duration=result.seconds)
         finish_record(result.status, result.error, result)
+        _count_usage(pb, values)
         await _broadcast({"type": "result", "text": text, "verdict": verdict, "reason": result.error,
                           "retries": 0, "duration": result.seconds})
         await _broadcast({"type": "status", "text": "done" if result.status == "done" else "error"})
@@ -1125,6 +1165,43 @@ async def run_playbook_task(pb: pbk.Playbook, values: dict, run_id: str) -> None
         await _persist()
         await _broadcast({"type": "action", "text": f"[Error] {err}"})
         await _broadcast({"type": "status", "text": "error"})
+
+
+def _count_usage(pb: pbk.Playbook, values: dict) -> None:
+    """A manual run is the same account as a scheduled one: it counts toward the daily allowance."""
+    try:
+        _limits.record(activities(pb, values), datetime.now())
+    except Exception:
+        _log.exception("could not count a run toward the daily limits")
+
+
+async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, schedule: Schedule, row: int) -> SchedOutcome:
+    """A scheduled run: nobody is there, so nothing is asked (a step that needs approval stops the run).
+    It leaves the user's chat alone; the record and the inbox are where it is reported."""
+    record = {"run_id": run_id, "playbook_version": pb.version, "started_at": datetime.now().timestamp(),
+              "attended": False, "schedule_id": schedule.id, "row": row, "inputs": values, "status": "failed",
+              "error": "", "steps": [], "outputs": [], "seconds": 0.0, "finished_at": 0.0}
+    try:
+        await _broadcast({"type": "status", "text": "running"})
+        await _broadcast({"type": "action", "text": f"⏰ Scheduled: {schedule.name} (row {row + 1} of {len(schedule.items)})"})
+        player = await _build_player(pb, attended=False)
+        result = await player.run(pb, values)
+        _save_run_record(pb, record, result.status, result.error, result)
+        await _broadcast({"type": "status", "text": "done" if result.status == "done" else "error"})
+        return SchedOutcome(result.status, run_id, result.error)
+    except asyncio.CancelledError:
+        _save_run_record(pb, record, "stopped", "Stopped by you.")
+        await _broadcast({"type": "status", "text": "idle"})
+        raise
+    except Exception as e:
+        if _ctl.stop_requested:
+            _save_run_record(pb, record, "stopped", "Stopped by you.")
+            await _broadcast({"type": "status", "text": "idle"})
+            return SchedOutcome("stopped", run_id, "Stopped by you.")
+        _log.exception("scheduled playbook run crashed")
+        _save_run_record(pb, record, "failed", str(e)[:300])
+        await _broadcast({"type": "status", "text": "error"})
+        return SchedOutcome("failed", run_id, str(e)[:300])
 
 
 def _pb_error(status: int, reason: str, **extra) -> JSONResponse:
@@ -1190,7 +1267,10 @@ async def save_playbook(body: dict):
     except OSError as e:
         _log.exception("could not save a playbook")
         return _pb_error(500, f"Couldn't write the playbook to disk ({type(e).__name__}: {e}).")
-    return {"ok": True, "playbook": saved.model_dump(mode="json"), "approved": pbk.is_approved(saved)}
+    approved = pbk.is_approved(saved)
+    affected = 0 if approved else sum(1 for x in _schedules.all() if x.playbook_id == saved.id and x.enabled)
+    return {"ok": True, "playbook": saved.model_dump(mode="json"), "approved": approved,
+            "schedules_affected": affected}
 
 
 @app.post("/playbooks/{pid}/run")
@@ -1227,6 +1307,18 @@ async def playbook_runs(pid: str):
     return {"ok": True, "runs": _runs.recent(pid)}
 
 
+@app.get("/playbooks/{pid}/runs/{rid}/screenshot")
+async def playbook_run_screenshot(pid: str, rid: str):
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    if not RunStore.is_valid_id(rid):
+        return _pb_error(400, "invalid run id")
+    data = _runs.screenshot(pid, rid)
+    if data is None:
+        return _pb_error(404, "no picture was kept for that run")
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/playbooks/{pid}/runs/{rid}")
 async def playbook_run(pid: str, rid: str):
     if (bad := _pb_id_or_error(pid)) is not None:
@@ -1261,7 +1353,8 @@ async def delete_playbook(pid: str):
     try:
         deleted = _playbooks.delete(pid)
         _runs.delete_playbook_runs(pid)
-        return {"ok": True, "deleted": deleted}
+        removed = _schedules.delete_for_playbook(pid)
+        return {"ok": True, "deleted": deleted, "schedules_deleted": removed}
     except OSError as e:
         _log.exception("could not delete a playbook")
         return _pb_error(500, f"Couldn't delete it ({type(e).__name__}: {e}).")
@@ -1285,6 +1378,235 @@ async def restore_playbook(pid: str, body: dict):
         _log.exception("could not restore a playbook")
         return _pb_error(500, f"Couldn't restore it ({type(e).__name__}: {e}).")
     return {"ok": True, "playbook": pb.model_dump(mode="json"), "approved": False}
+
+
+# ---------------------------------------------------------------------------
+# Schedules (see schedules.py, scheduler.py): playbooks that run by themselves
+# ---------------------------------------------------------------------------
+_schedules = ScheduleStore(app_paths.SCHEDULES_FILE)
+_limits = SiteLimits(app_paths.SITE_LIMITS_FILE)
+_notifications = NotificationStore(app_paths.NOTIFICATIONS_FILE)
+_desktop = DesktopNotifier(enabled=lambda: _notifications.desktop_enabled())
+_scheduler_task: asyncio.Task | None = None
+
+
+async def _notify_user(level: str, title: str, text: str = "", **ids) -> None:
+    """Put it in the inbox, tell any open window, and (for things that need attention) pop a desktop toast."""
+    try:
+        item = _notifications.add(level, title, text, **{k: v for k, v in ids.items()
+                                                         if k in ("schedule_id", "playbook_id", "run_id")})
+    except Exception:
+        _log.exception("could not store a notification")
+        return
+    await _broadcast({"type": "notification", **item, "unread": _notifications.unread_count()})
+    if level in ("warning", "error") and not sch.in_quiet_hours(_schedules.quiet_hours(), datetime.now()):
+        _desktop.notify(title, text)                       # in quiet hours the inbox still records it, silently
+
+
+async def _execute_scheduled(pb: pbk.Playbook, values: dict, schedule: Schedule, row: int) -> SchedOutcome:
+    """Hand one row to the same single-run slot a manual task uses, and wait for how it ended."""
+    run_id = RunStore.new_id()
+    done: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    async def job() -> None:
+        outcome = await run_playbook_unattended(pb, values, run_id, schedule, row)
+        if not done.done():
+            done.set_result(outcome)
+
+    try:
+        _ctl.start(lambda: _run_guarded(job()), origin=f"Scheduled: {schedule.name}", fmt="auto")
+    except Busy:
+        return SchedOutcome("busy")                       # the user started something in the meantime: wait
+
+    def ended(task: asyncio.Task) -> None:               # however the run ends (even cancelled before it began)
+        if not done.done():
+            done.set_result(SchedOutcome("stopped" if task.cancelled() else "failed", run_id,
+                                         "Stopped by you." if task.cancelled() else "The run ended unexpectedly."))
+    if _ctl.task is not None:
+        _ctl.task.add_done_callback(ended)
+    return await done
+
+
+async def _scheduler_housekeeping(days: int) -> None:
+    await asyncio.to_thread(_runs.prune_older_than, days)
+    await asyncio.to_thread(_notifications.prune_older_than, days)
+
+
+def _scheduler_idle() -> bool:
+    return not _user_is_busy()
+
+
+_scheduler = Scheduler(schedules=_schedules, playbooks=_playbooks, limits=_limits, execute=_execute_scheduled,
+                       idle=_scheduler_idle, notify=_notify_user,
+                       maintenance=_scheduler_housekeeping)
+
+
+def _schedule_status(s: Schedule, now: datetime) -> str:
+    st = s.state
+    if st.paused_reason:
+        return "paused"
+    if not s.enabled:
+        return "off"
+    if st.queue:
+        resume = sch.parse_iso(st.resume_after)
+        return "waiting" if resume is not None and resume > now else "running"
+    return "scheduled" if st.next_run else "finished"
+
+
+def _schedule_view(s: Schedule, names: dict[str, str]) -> dict:
+    st = s.state
+    return {
+        "id": s.id, "name": s.name, "playbook_id": s.playbook_id, "playbook_name": names.get(s.playbook_id, ""),
+        "enabled": s.enabled, "cadence": s.cadence.model_dump(mode="json"), "cadence_text": sch.describe(s.cadence),
+        "items": s.items, "on_failure": s.on_failure, "allow_sensitive": s.allow_sensitive,
+        "status": _schedule_status(s, datetime.now()), "next_run": st.next_run, "last_run_at": st.last_run_at,
+        "last_status": st.last_status, "last_detail": st.last_detail, "paused_reason": st.paused_reason,
+        "paused_detail": st.paused_detail, "missed": st.missed, "runs_total": st.runs_total,
+        "remaining": len(st.queue), "resume_after": st.resume_after,
+    }
+
+
+_SCHEDULE_FIELDS = ("id", "name", "playbook_id", "enabled", "cadence", "items", "on_failure", "allow_sensitive")
+
+
+@app.get("/schedules")
+async def list_schedules():
+    names = {r["id"]: r["name"] for r in _playbooks.summaries()}
+    return {"ok": True, "paused_all": _schedules.paused_all, "problem": _schedules.load_problem,
+            "schedules": [_schedule_view(s, names) for s in _schedules.all()],
+            "limits": {**_limits.settings(), "usage": _limits.usage_summary(datetime.now().date())},
+            "quiet_hours": _schedules.quiet_hours().model_dump(mode="json"),
+            "desktop": _notifications.desktop_enabled()}
+
+
+@app.post("/schedules")
+async def save_schedule(body: dict):
+    raw = body.get("schedule") if isinstance(body.get("schedule"), dict) else {}
+    try:
+        incoming = {k: raw[k] for k in _SCHEDULE_FIELDS if k in raw}
+        if isinstance(incoming.get("items"), list):             # a form sends everything as text
+            incoming["items"] = [{str(k): str(v) for k, v in it.items()} if isinstance(it, dict) else it
+                                 for it in incoming["items"]]
+        s = Schedule.model_validate({**incoming, "state": {}})
+    except ValueError as e:
+        return _pb_error(400, "That is not a valid schedule.", problems=[str(e)[:300]])
+    now = datetime.now()
+    existing = _schedules.get(s.id) if s.id else None
+    if s.id and existing is None:
+        return _pb_error(404, "That schedule no longer exists.")
+    try:
+        pb = _playbooks.get(s.playbook_id) if pbk_id_ok(s.playbook_id) else None
+    except (PlaybookNotFound, PlaybookInvalid, OSError):
+        pb = None
+    problems = sch.validate_schedule(s, pb, now)
+    if problems:
+        return _pb_error(400, "The schedule has problems.", problems=problems)
+    try:
+        saved = _schedules.save(s)
+    except TooManySchedules as e:
+        return _pb_error(400, str(e))
+    except OSError as e:
+        _log.exception("could not save a schedule")
+        return _pb_error(500, f"Couldn't write the schedule to disk ({type(e).__name__}: {e}).")
+
+    def settle(st: ScheduleState) -> ScheduleState:
+        # a new schedule, a changed time, or a schedule that was switched on gets its next time worked out
+        # from now; changed inputs cancel a batch that is half done (its row numbers no longer mean anything)
+        update: dict = {}
+        if existing is None or existing.cadence != saved.cadence or (saved.enabled and not existing.enabled):
+            update["next_run"] = sch.iso(sch.next_run(saved.cadence, now))
+        if existing is not None and (existing.items != saved.items or existing.playbook_id != saved.playbook_id
+                                     or (existing.enabled and not saved.enabled)):
+            # changed rows have new numbers, and switching a schedule off must stop what it was doing
+            update.update(queue=[], batch_results=[], resume_after=None)
+        return st.model_copy(update=update) if update else st
+    saved = _schedules.change_state(saved.id, settle)
+    names = {r["id"]: r["name"] for r in _playbooks.summaries()}
+    return {"ok": True, "schedule": _schedule_view(saved, names)}
+
+
+def _schedule_id_or_error(sid: str) -> JSONResponse | None:
+    return None if sch.is_valid_id(sid) else _pb_error(400, "invalid schedule id")
+
+
+@app.delete("/schedules/{sid}")
+async def delete_schedule(sid: str):
+    if (bad := _schedule_id_or_error(sid)) is not None:
+        return bad
+    return {"ok": True, "deleted": _schedules.delete(sid)}
+
+
+@app.post("/schedules/pause-all")
+async def pause_all_schedules(body: dict):
+    _schedules.set_paused_all(body.get("paused") is True)
+    return {"ok": True, "paused_all": _schedules.paused_all}
+
+
+@app.post("/schedules/{sid}/resume")
+async def resume_schedule(sid: str):
+    if (bad := _schedule_id_or_error(sid)) is not None:
+        return bad
+    try:
+        s = _scheduler.resume(sid)
+    except ScheduleNotFound:
+        return _pb_error(404, "That schedule no longer exists.")
+    return {"ok": True, "schedule": _schedule_view(s, {r["id"]: r["name"] for r in _playbooks.summaries()})}
+
+
+@app.post("/schedules/{sid}/run-now")
+async def run_schedule_now(sid: str):
+    if (bad := _schedule_id_or_error(sid)) is not None:
+        return bad
+    why = await _scheduler.run_now(sid)
+    return {"ok": True} if not why else _pb_error(409, why)
+
+
+@app.post("/scheduler/quiet-hours")
+async def set_quiet_hours(body: dict):
+    if "enabled" in body and type(body["enabled"]) is not bool:
+        return _pb_error(400, "Those quiet hours can't be used.", problems=["'enabled' must be true or false"])
+    try:
+        q = sch.QuietHours.model_validate({k: body[k] for k in ("enabled", "start", "end") if k in body})
+    except ValueError as e:
+        return _pb_error(400, "Those quiet hours can't be used.", problems=[str(e)[:200]])
+    problems = sch.quiet_problems(q)
+    if problems:
+        return _pb_error(400, "Those quiet hours can't be used.", problems=problems)
+    _schedules.set_quiet_hours(q)
+    return {"ok": True, "quiet_hours": q.model_dump(mode="json")}
+
+
+@app.post("/scheduler/limits")
+async def set_limits(body: dict):
+    problems = _limits.configure(body.get("allowances") if isinstance(body.get("allowances"), dict) else None,
+                                 body.get("gap") if isinstance(body.get("gap"), dict) else None)
+    if problems:
+        return _pb_error(400, "Those limits can't be used.", problems=problems)
+    return {"ok": True, "limits": {**_limits.settings(), "usage": _limits.usage_summary(datetime.now().date())}}
+
+
+@app.get("/notifications")
+async def list_notifications(limit: int = 50):
+    return {"ok": True, "items": _notifications.recent(_as_int(limit, 50, low=1, high=300)),
+            "unread": _notifications.unread_count(), "desktop": _notifications.desktop_enabled()}
+
+
+@app.post("/notifications/read")
+async def read_notifications(body: dict):
+    ids = body.get("ids")
+    n = _notifications.mark_read([str(i) for i in ids] if isinstance(ids, list) else None)
+    return {"ok": True, "changed": n, "unread": _notifications.unread_count()}
+
+
+@app.delete("/notifications")
+async def clear_notifications():
+    return {"ok": True, "cleared": _notifications.clear(), "unread": 0}
+
+
+@app.post("/notifications/desktop")
+async def set_desktop_notifications(body: dict):
+    _notifications.set_desktop(body.get("enabled") is True)
+    return {"ok": True, "desktop": _notifications.desktop_enabled()}
 
 
 # Serve compiled React frontend assets (must come after all API routes)

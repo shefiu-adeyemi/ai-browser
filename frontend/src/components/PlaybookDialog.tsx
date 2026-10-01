@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { X, Trash2, BookMarked, History as HistoryIcon, Pencil, AlertTriangle } from 'lucide-react'
-import type { DamagedPlaybook, PlaybookSummary } from '@/types'
+import type { DamagedPlaybook, PlaybookSummary, ScheduleView } from '@/types'
 import Editor from './playbook/Editor'
 import History from './playbook/History'
 import RunForm from './playbook/RunForm'
+import ScheduleForm from './playbook/ScheduleForm'
+import Schedules from './playbook/Schedules'
 import { errText, readJson, reasonOf } from './playbook/shared'
 
 interface Props {
@@ -22,9 +24,12 @@ type View =
   | { kind: 'edit'; id: string }
   | { kind: 'run'; id: string }
   | { kind: 'history'; id: string; name: string }
+  | { kind: 'schedules' }
+  | { kind: 'schedule'; existing: ScheduleView | null }
 
 const TITLE: Record<View['kind'], string> = {
   library: 'Playbooks', save: 'Save this run as a playbook', edit: 'Edit playbook', run: 'Run a playbook', history: 'Run history',
+  schedules: 'Schedules', schedule: 'Schedule',
 }
 
 /**
@@ -80,6 +85,24 @@ export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props
             <X size={16} />
           </button>
         </div>
+        {(view.kind === 'library' || view.kind === 'schedules') && (
+          <div role="tablist" aria-label="Playbooks or schedules" className="flex gap-1 border-b border-gray-100 px-5">
+            {([['library', 'Playbooks'], ['schedules', 'Schedules']] as const).map(([k, label]) => (
+              <button key={k} role="tab" aria-selected={view.kind === k} onClick={() => setView({ kind: k })}
+                className={`border-b-2 px-3 py-2 text-xs font-medium ${view.kind === k ? 'border-brand text-brand' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+        {view.kind === 'schedules' && (
+          <Schedules notify={notify} onNew={() => setView({ kind: 'schedule', existing: null })}
+            onEdit={(s) => setView({ kind: 'schedule', existing: s })} />
+        )}
+        {view.kind === 'schedule' && (
+          <ScheduleForm existing={view.existing} onCancel={() => setView({ kind: 'schedules' })}
+            onSaved={(name) => { notify(`Saved the schedule "${name}".`); setView({ kind: 'schedules' }) }} />
+        )}
         {view.kind === 'library' && (
           <Library
             canSave={canSave}
@@ -95,7 +118,12 @@ export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props
           <Editor mode="draft" onCancel={library} onSaved={(name) => { notify(`Saved the playbook "${name}".`); onClose() }} />
         )}
         {view.kind === 'edit' && (
-          <Editor mode="edit" id={view.id} onCancel={library} onSaved={(name) => { notify(`Saved "${name}".`); library() }} />
+          <Editor mode="edit" id={view.id} onCancel={library} onSaved={(name, affected) => {
+            notify(affected > 0
+              ? `Saved "${name}". ${affected} schedule${affected === 1 ? '' : 's'} will pause until you approve it again.`
+              : `Saved "${name}".`)
+            library()
+          }} />
         )}
         {view.kind === 'run' && (
           <RunForm
@@ -144,8 +172,10 @@ function Library({ canSave, busy, onSave, onRun, onEdit, onHistory, notify }: {
   const remove = async (id: string, name: string) => {
     try {
       const res = await fetch(`/playbooks/${id}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      notify(`Deleted "${name}".`)
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(reasonOf(res, data))
+      const gone = Number(data.schedules_deleted) || 0
+      notify(gone > 0 ? `Deleted "${name}" and ${gone} schedule${gone === 1 ? '' : 's'} that used it.` : `Deleted "${name}".`)
       setConfirming(null)
       load()
     } catch (e) {

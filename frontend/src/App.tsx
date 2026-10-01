@@ -3,6 +3,7 @@ import BrowserPane from '@/components/BrowserPane'
 import ChatPanel from '@/components/ChatPanel'
 import ApprovalPrompt from '@/components/ApprovalPrompt'
 import PlaybookDialog from '@/components/PlaybookDialog'
+import NotificationsDialog from '@/components/NotificationsDialog'
 import Toast, { type ToastMessage } from '@/components/Toast'
 import { generateId } from '@/lib/utils'
 import type { Turn, Status, SessionInfo, FormatOption, WsMessage, ApprovalRequest, BrowserState } from '@/types'
@@ -19,6 +20,8 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [playbooksOpen, setPlaybooksOpen] = useState(false)
+  const [inboxOpen, setInboxOpen] = useState(false)
+  const [unread, setUnread] = useState(0)
   const [maxSteps, setMaxSteps] = useState<number | undefined>(undefined)
   const [lastDuration, setLastDuration] = useState<number | undefined>(undefined)
   const [currentAction, setCurrentAction] = useState<string | undefined>(undefined)
@@ -74,6 +77,14 @@ export default function App() {
   }, [chatWidth, saveLayout])
 
   const notify = useCallback((text: string) => setToast({ id: Date.now(), text }), [])
+
+  // How many inbox entries are unread (after that the server tells us as they arrive).
+  useEffect(() => {
+    fetch('/notifications?limit=1')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && typeof d.unread === 'number') setUnread(d.unread) })
+      .catch(() => { /* the bell just shows no count */ })
+  }, [])
 
   // The agent's browser as the toolbar needs it: tabs, back / forward, current page. Polled while the
   // window is visible; refreshed straight away after every toolbar action.
@@ -220,6 +231,10 @@ export default function App() {
                   : m
               )
             })
+          } else if (msg.type === 'notification') {
+            // A scheduled run wants attention (or finished). The desktop toast comes from the server.
+            setUnread(msg.unread)
+            if (msg.level !== 'info') notify(msg.title)
           } else if (msg.type === 'approval') {
             setApproval(msg)
           } else if (msg.type === 'approval_done') {
@@ -504,6 +519,7 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-gray-100">
       <Toast toast={toast} onClose={closeToast} />
+      {inboxOpen && <NotificationsDialog onClose={() => setInboxOpen(false)} onUnread={setUnread} />}
       {playbooksOpen && (
         <PlaybookDialog
           onClose={() => setPlaybooksOpen(false)}
@@ -589,6 +605,8 @@ export default function App() {
               settingsOpen={settingsOpen}
               onSettingsOpen={setSettingsOpen}
               onOpenPlaybooks={() => setPlaybooksOpen(true)}
+              onOpenInbox={() => setInboxOpen(true)}
+              unread={unread}
               onSendTask={sendTask}
               onStop={handleStop}
               onContinue={handleContinue}

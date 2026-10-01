@@ -36,6 +36,7 @@ from playbook_match import Candidate, Match, candidates_from_selector_map, find
 
 MAX_RUN_SECONDS = 900
 MAX_OUTPUT = 20000
+MAX_SCREENSHOT = 400_000          # bytes; a bigger picture is not kept
 _LOGIN_PATH = re.compile(r"^/(login|signin|sign-in|sign_in|uas/login|authwall|checkpoint)(/|$|\?)", re.IGNORECASE)
 _NOT_AVAILABLE = re.compile(r"^Element index \d+ not available", re.IGNORECASE)
 
@@ -63,6 +64,8 @@ class RunResult:
     error: str = ""
     started_at: float = 0.0
     finished_at: float = 0.0
+    screenshot: Optional[bytes] = None      # what the page looked like when the run stopped (JPEG), if it did not finish
+
 
     @property
     def seconds(self) -> float:
@@ -70,7 +73,8 @@ class RunResult:
 
     def to_dict(self) -> dict:
         return {"status": self.status, "error": self.error, "seconds": self.seconds,
-                "steps": [asdict(s) for s in self.steps], "outputs": self.outputs}
+                "steps": [asdict(s) for s in self.steps], "outputs": self.outputs,
+                "screenshot": self.screenshot is not None}
 
 
 # ------------------------------------------------------------------------------- approvals
@@ -126,6 +130,15 @@ class SessionDriver:
 
     async def url(self) -> str:
         return await self.session.get_current_page_url()
+
+    async def screenshot(self) -> Optional[bytes]:
+        """A small JPEG of the page, or None if it can't be taken (the page is gone, it takes too long)."""
+        try:
+            return await asyncio.wait_for(self.session.take_screenshot(format="jpeg", quality=55), timeout=10)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
 
     async def tabs(self) -> list[str]:
         """The ids (browser-use names a tab by the last 4 characters of its id) of the open tabs, in order."""
@@ -269,6 +282,7 @@ class PlaybookPlayer:
                     await self._check_sign_in(res)
             if res.status != "ok":
                 await self._say(f"✖ Step {n} stopped the run: {res.detail}")
+                result.screenshot = await self._picture()
                 return finish("needs_you" if res.status == "needs_you" else "failed",
                               f"Step {n} ({describe(step)}): {res.detail}")
         return finish("done")
@@ -459,6 +473,19 @@ class PlaybookPlayer:
             return await self.driver.url() or ""
         except Exception:
             return ""
+
+    async def _picture(self) -> Optional[bytes]:
+        """What the page looked like when the run stopped, for the failure report. Never raises."""
+        take = getattr(self.driver, "screenshot", None)
+        if take is None:
+            return None
+        try:
+            data = await take()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        return data if isinstance(data, (bytes, bytearray)) and 0 < len(data) <= MAX_SCREENSHOT else None
 
     async def _left_approved_sites(self) -> str:
         """The host the page is on if it is outside the approved sites, else ''."""

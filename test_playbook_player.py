@@ -417,6 +417,62 @@ class Approvals(PlayerCase):
         self.assertEqual([s.approval for s in r.steps], [None, "preapproved", "asked"])
 
 
+class FailurePicture(PlayerCase):
+    JPEG = b"\xff\xd8\xff-picture"
+
+    async def test_a_run_that_stops_keeps_a_picture_of_the_page(self):
+        page = self.build()
+        async def shot(): return self.JPEG
+        page.screenshot = shot
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Missing", h=1))]))
+        self.assertEqual(r.status, "failed")
+        self.assertEqual(r.screenshot, self.JPEG)
+        self.assertTrue(r.to_dict()["screenshot"])
+        self.assertNotIn(self.JPEG, str(r.to_dict()).encode())                  # bytes are never put in the record itself
+
+    async def test_a_needs_you_stop_also_keeps_one(self):
+        page = self.build(attended=False)
+        async def shot(): return self.JPEG
+        page.screenshot = shot
+        page.risky_keys = "Press Enter?"
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/"), S(2, "key", keys="Enter", ask=True)]))
+        self.assertEqual((r.status, r.screenshot), ("needs_you", self.JPEG))
+
+    async def test_a_finished_run_takes_no_picture(self):
+        page = self.build()
+        calls = []
+        async def shot(): calls.append(1); return self.JPEG
+        page.screenshot = shot
+        r = await self.run_pb(make_pb([S(1, "wait", seconds=1)]))
+        self.assertEqual((r.status, r.screenshot, calls), ("done", None, []))
+        self.assertFalse(r.to_dict()["screenshot"])
+
+    async def test_no_picture_support_a_failing_camera_or_a_huge_picture_never_break_the_report(self):
+        for behaviour in (None, "boom", "empty", "huge", "text"):
+            page = self.build()
+            if behaviour == "boom":
+                async def shot(): raise RuntimeError("page is gone")
+                page.screenshot = shot
+            elif behaviour == "empty":
+                async def shot(): return b""
+                page.screenshot = shot
+            elif behaviour == "huge":
+                async def shot(): return b"x" * 500_000
+                page.screenshot = shot
+            elif behaviour == "text":
+                async def shot(): return "not bytes"
+                page.screenshot = shot
+            r = await self.run_pb(make_pb([S(1, "ai", query="decide")]))
+            self.assertEqual((r.status, r.screenshot), ("failed", None), behaviour)
+
+    async def test_cancellation_while_taking_the_picture_is_not_swallowed(self):
+        page = self.build()
+        async def shot(): raise asyncio.CancelledError()
+        page.screenshot = shot
+        with self.assertRaises(asyncio.CancelledError):
+            await self.run_pb(make_pb([S(1, "ai", query="decide")]))
+
+
 class Timing(PlayerCase):
     async def test_time_spent_waiting_for_the_user_is_not_counted(self):
         page = self.build([el(4, "Send")], max_seconds=10)

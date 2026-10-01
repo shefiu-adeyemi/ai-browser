@@ -11,6 +11,7 @@ import agent_ui
 import playbook as pbk
 from chat_store import ChatStore
 from playbook_store import PlaybookStore
+from schedule_store import ScheduleStore
 
 
 def fake_history():
@@ -32,6 +33,7 @@ class PlaybookApi(unittest.TestCase):
         self.store = PlaybookStore(self.tmp / "playbooks")
         for p in (mock.patch.object(agent_ui, "_playbooks", self.store),
                   mock.patch.object(agent_ui, "_last_run", None),
+                  mock.patch.object(agent_ui, "_schedules", ScheduleStore(self.tmp / "sch.json")),
                   mock.patch.object(agent_ui, "_current_session_id", ChatStore.new_id())):
             p.start()
             self.addCleanup(p.stop)
@@ -206,7 +208,7 @@ class PlaybookApi(unittest.TestCase):
         (self.tmp / "playbooks" / f"{pid}.json").write_text("{nope", encoding="utf-8")
         data = self.c.get("/playbooks").json()
         self.assertEqual([d["id"] for d in data["damaged"]], [pid])
-        self.assertEqual(self.c.delete(f"/playbooks/{pid}").json(), {"ok": True, "deleted": True})
+        self.assertEqual(self.c.delete(f"/playbooks/{pid}").json(), {"ok": True, "deleted": True, "schedules_deleted": 0})
         self.assertEqual(self.c.get("/playbooks").json()["damaged"], [])
 
     def test_list_get_delete(self):
@@ -215,9 +217,9 @@ class PlaybookApi(unittest.TestCase):
         self.assertEqual([r["id"] for r in rows], [a["id"]])
         got = self.c.get(f"/playbooks/{a['id']}").json()
         self.assertEqual(got["playbook"]["name"], "A")
-        self.assertEqual(self.c.delete(f"/playbooks/{a['id']}").json(), {"ok": True, "deleted": True})
+        self.assertEqual(self.c.delete(f"/playbooks/{a['id']}").json(), {"ok": True, "deleted": True, "schedules_deleted": 0})
         self.assertEqual(self.c.get(f"/playbooks/{a['id']}").status_code, 404)
-        self.assertEqual(self.c.delete(f"/playbooks/{a['id']}").json(), {"ok": True, "deleted": False})
+        self.assertEqual(self.c.delete(f"/playbooks/{a['id']}").json(), {"ok": True, "deleted": False, "schedules_deleted": 0})
 
     def test_bad_ids_are_refused_without_touching_files(self):
         victim = self.tmp / "victim.json"

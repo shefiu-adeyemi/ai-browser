@@ -15,6 +15,7 @@ from playbook import Check, Playbook, Step, Variable
 from playbook_player import RunResult, StepResult
 from playbook_runs import RunStore
 from playbook_store import PlaybookStore
+from schedule_store import ScheduleStore
 
 
 def linkedin_pb() -> Playbook:
@@ -35,7 +36,8 @@ class Base(unittest.TestCase):
         self.store, self.runs = PlaybookStore(self.tmp / "pb"), RunStore(self.tmp / "runs")
         for p in (mock.patch.object(agent_ui, "_playbooks", self.store), mock.patch.object(agent_ui, "_runs", self.runs),
                   mock.patch.object(agent_ui, "_current_session_id", ChatStore.new_id()),
-                  mock.patch.object(agent_ui, "_last_run", None)):
+                  mock.patch.object(agent_ui, "_last_run", None),
+                  mock.patch.object(agent_ui, "_schedules", ScheduleStore(self.tmp / "sch.json"))):
             p.start()
             self.addCleanup(p.stop)
         agent_ui._ctl.running = agent_ui._ctl.paused = False
@@ -112,7 +114,7 @@ class Endpoints(Base):
 
     def test_deleting_a_playbook_deletes_its_runs(self):
         self.runs.save(self.pb.id, {"run_id": RunStore.new_id(), "status": "done"})
-        self.assertEqual(self.c.delete(f"/playbooks/{self.pb.id}").json(), {"ok": True, "deleted": True})
+        self.assertEqual(self.c.delete(f"/playbooks/{self.pb.id}").json(), {"ok": True, "deleted": True, "schedules_deleted": 0})
         self.assertEqual(self.runs.recent(self.pb.id), [])
 
     def test_the_endpoints_need_the_app_cookie(self):

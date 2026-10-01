@@ -8,7 +8,7 @@ Built on [browser-use](https://github.com/browser-use/browser-use) with a FastAP
 
 ## Setup
 
-1. **Python 3.12** and **Node.js 18+**.
+1. **Python 3.12** and **Node.js 22+** (the web UI build and its tests need it).
 2. Install the Python packages: `pip install -r requirements.txt`
    (the first run also downloads a Chromium for the agent if it can't find one).
 3. Build the web UI once: `cd frontend && npm install && npm run build`

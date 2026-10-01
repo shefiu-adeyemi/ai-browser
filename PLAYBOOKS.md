@@ -1,4 +1,4 @@
-# Playbooks: design (approved; phases 1 and 2 built, see the status sections at the end)
+# Playbooks: design (approved; phases 1, 2 and 3 built, see the status sections at the end)
 
 Full plan = this file (core: recording, approval policy, first playbook, build order) plus
 PLAYBOOKS_ROADMAP.md (scrape + batch, change monitoring + notifications, human checkpoints, natural
@@ -169,3 +169,36 @@ Still limits (honest list): general `ai` steps stop the run (only `extract` read
 upload, or JavaScript steps (recorded runs list them as notes); no self-heal (a vanished element stops the run);
 unattended runs are supported by the player but have no scheduler/entry point yet; nothing has been run
 against real LinkedIn (needs a signed-in account and respects its terms); tab positions assume one starting tab.
+
+
+## Phase 3 status: scheduler (built and tested)
+Built: schedules (`schedules.py`, `schedule_store.py`), the scheduler (`scheduler.py`), daily allowances and
+gaps (`site_limits.py`), the inbox and desktop toasts (`notifications.py`), the unattended runner and API in
+`agent_ui.py` (`/schedules*`, `/scheduler/limits`, `/notifications*`), and the UI (Schedules tab with a
+create/edit form and the limits editor, a bell with an unread count, the inbox). Tests: `test_schedules.py`,
+`test_site_limits.py`, `test_notifications.py`, `test_schedule_store.py`, `test_scheduler.py`,
+`test_schedules_app.py`, and the opt-in real-browser `test_scheduler_browser.py`.
+
+Behaviour (all from the approved policy):
+- A schedule is a playbook plus rows of inputs (one run per row), a time (once, every N minutes/hours, daily,
+  certain weekdays; local time), and a choice of what to do when a row can't finish: stop and tell me
+  (the schedule pauses until resumed) or tell me and carry on with the next row.
+- Only APPROVED playbooks can be scheduled. Editing a playbook removes its approval, and the scheduler then
+  refuses to run it and pauses the schedule with the reason. A playbook with send/post steps also needs the
+  schedule's own "let these run while I'm away" tick. A playbook with a hand-off or AI step can't be scheduled.
+- Unattended runs never ask: a pre-approved step runs only if the element is found with certainty, otherwise
+  the run stops "needs you" (verified in a real browser: it does not press Send when unsure).
+- Fires only while the app is open. A run missed by more than 5 minutes is skipped and recorded, never run late.
+- One run at a time, never during the user's own task, and never within 60 s of the user using the live view
+  or toolbar by hand: due work waits.
+- Pacing: per-activity daily allowances that ramp up weekly (LinkedIn profile views 50/day rising 10/week to
+  150; sends 15 rising to 25), editable, and a random 30-60 s gap between runs on a site. A day's allowance used
+  up holds the rest of a batch until tomorrow (one notice). Manual runs count toward the same allowances.
+- Notifications: inbox (300 kept, 30 days) plus a Windows toast for warnings/errors (sent as PowerShell,
+  because Windows only shows toasts from registered apps). Quiet successes are not announced; a batch of several
+  rows gets one summary. A "pause all schedules" switch stops everything.
+- Retention: run records and inbox entries older than 30 days are pruned once a day.
+
+Not built / known limits: no quiet hours; a daily time that falls in the hour a clock change skips counts as
+missed; the batch continues after an app restart (it is not "missed"); the app must be running (no background
+service); the Windows toast could not be seen from here, only sent without error (a test toast was sent).

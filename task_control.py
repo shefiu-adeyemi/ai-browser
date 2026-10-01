@@ -34,6 +34,11 @@ class TaskController:
         self._stop_requested = False
 
     @property
+    def task(self) -> Optional[asyncio.Task]:
+        """The asyncio task of the current (or last) run, so a caller can be told when it ends however it ends."""
+        return self._task
+
+    @property
     def stop_requested(self) -> bool:
         """True from the moment Stop is pressed until the next run starts. A run uses this to
         tell "I was stopped" apart from "I failed": browser-use's own cleanup can raise an

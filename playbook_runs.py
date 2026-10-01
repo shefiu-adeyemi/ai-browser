@@ -65,6 +65,35 @@ class RunStore:
             self._prune(pid)
             return record
 
+    def save_screenshot(self, pid: str, rid: str, data: bytes) -> None:
+        """Keep the picture of where a run stopped. It lives and dies with its record."""
+        with self._lock:
+            path = self._path(pid, rid).with_suffix(".jpg")
+            self._folder(pid).mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
+            try:
+                tmp.write_bytes(data)
+                tmp.replace(path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+
+    def screenshot(self, pid: str, rid: str) -> Optional[bytes]:
+        with self._lock:
+            try:
+                return self._path(pid, rid).with_suffix(".jpg").read_bytes()
+            except FileNotFoundError:
+                return None
+
+    def _remove(self, json_path: Path) -> bool:
+        """Delete a record and its picture."""
+        try:
+            json_path.unlink()
+        except OSError:
+            return False
+        json_path.with_suffix(".jpg").unlink(missing_ok=True)
+        return True
+
     def get(self, pid: str, rid: str) -> Optional[dict]:
         with self._lock:
             path = self._path(pid, rid)                  # a bad id is an error, not "unreadable"
@@ -100,11 +129,9 @@ class RunStore:
             n = 0
             if folder.is_dir():
                 for f in folder.glob("run_*.json"):
-                    try:
-                        f.unlink()
-                        n += 1
-                    except OSError:
-                        pass
+                    n += self._remove(f)
+                for f in folder.glob("run_*.jpg"):                 # a picture whose record is already gone
+                    f.unlink(missing_ok=True)
                 try:
                     folder.rmdir()
                 except OSError:
@@ -122,8 +149,7 @@ class RunStore:
                 for f in folder.glob("run_*.json"):
                     try:
                         if f.stat().st_mtime < cutoff:
-                            f.unlink()
-                            n += 1
+                            n += self._remove(f)
                     except OSError:
                         pass
         return n
@@ -131,7 +157,4 @@ class RunStore:
     def _prune(self, pid: str) -> None:
         files = sorted(self._folder(pid).glob("run_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
         for old in files[self.keep:]:
-            try:
-                old.unlink()
-            except OSError:
-                pass
+            self._remove(old)

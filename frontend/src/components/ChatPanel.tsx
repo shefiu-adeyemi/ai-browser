@@ -10,7 +10,7 @@ import { cn, formatDuration, formatDate, plural } from '@/lib/utils'
 import {
   Plus, Settings, ChevronDown, Square, Trash2, ChevronRight,
   Briefcase, Newspaper, ShoppingBag, MapPin, ArrowUp, X,
-  MessageSquare, History, Eye, EyeOff, Pencil, Search, Copy, ChevronsRight, Maximize2, Minimize2, Globe, Sparkles, List, Table2, BookMarked,
+  MessageSquare, History, Eye, EyeOff, Pencil, Search, Copy, ChevronsRight, Maximize2, Minimize2, Globe, Sparkles, List, Table2, BookMarked, Bell,
 } from 'lucide-react'
 import type { Turn, Status, SessionInfo, Settings as SettingsType, FormatOption, Verdict } from '@/types'
 
@@ -31,6 +31,8 @@ interface ChatPanelProps {
   settingsOpen: boolean
   onSettingsOpen: (v: boolean) => void
   onOpenPlaybooks: () => void
+  onOpenInbox: () => void
+  unread: number
   onSendTask: (task: string, fmt: FormatOption) => void
   onStop: () => void
   onContinue: (extraSteps: number) => void
@@ -1281,6 +1283,8 @@ export default function ChatPanel({
   settingsOpen,
   onSettingsOpen,
   onOpenPlaybooks,
+  onOpenInbox,
+  unread,
   onSendTask,
   onStop,
   onContinue,
@@ -1425,6 +1429,23 @@ export default function ChatPanel({
                       <TooltipContent side="bottom">Hide chat panel</TooltipContent>
                     </Tooltip>
                   )}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label={unread > 0 ? `Inbox, ${unread} unread` : 'Inbox'}
+                        onClick={onOpenInbox}
+                        className="relative w-8 h-8 rounded-xl hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
+                      >
+                        <Bell size={15} />
+                        {unread > 0 && (
+                          <span className="absolute -right-0.5 -top-0.5 min-w-[16px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold leading-4 text-white">
+                            {unread > 9 ? '9+' : unread}
+                          </span>
+                        )}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">{unread > 0 ? `${unread} unread` : 'Inbox'}</TooltipContent>
+                  </Tooltip>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button

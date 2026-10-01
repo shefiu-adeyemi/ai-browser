@@ -8,7 +8,8 @@ interface Props {
   mode: 'draft' | 'edit'
   id?: string
   onCancel: () => void
-  onSaved: (name: string) => void
+  /** `schedulesAffected`: how many switched-on schedules lost their approval because of this save. */
+  onSaved: (name: string, schedulesAffected: number) => void
 }
 
 /**
@@ -124,7 +125,7 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
       })
       const data = await readJson(res)
       if (!res.ok || !data.ok) { setProblems(data.problems?.length ? data.problems : [reasonOf(res, data)]); return }
-      onSaved(data.playbook.name)
+      onSaved(data.playbook.name, Number(data.schedules_affected) || 0)
     } catch (e) {
       setProblems([`Couldn't save (${errText(e)}).`])
     } finally { setBusy(false) }

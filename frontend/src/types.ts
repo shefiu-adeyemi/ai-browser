@@ -97,6 +97,7 @@ export type WsMessage =
   | ({ type: 'approval' } & ApprovalRequest)
   | { type: 'approval_done'; id: string }
   | { type: 'session_changed'; id: string; history: Array<{ role: 'user' | 'agent'; content: string; ts: string }> }
+  | ({ type: 'notification'; unread: number } & Omit<NotificationItem, 'read'> & { read?: boolean })
 
 // ── Playbooks (server: playbook.py, the single source of truth for the format) ──
 export interface PlaybookFingerprint {
@@ -207,4 +208,59 @@ export interface PlaybookRunRecord extends Omit<PlaybookRunSummary, 'steps' | 'o
 export interface DamagedPlaybook {
   id: string
   problem: string
+}
+
+// ── Schedules and the inbox (server: schedules.py, scheduler.py, notifications.py) ──
+export type CadenceKind = 'once' | 'interval' | 'daily' | 'weekly'
+
+export interface Cadence {
+  kind: CadenceKind
+  every_minutes?: number | null
+  at?: string | null
+  weekdays?: number[]
+  run_at?: string | null
+}
+
+export interface ScheduleView {
+  id: string
+  name: string
+  playbook_id: string
+  playbook_name: string
+  enabled: boolean
+  cadence: Cadence
+  cadence_text: string
+  items: Record<string, string>[]
+  on_failure: 'stop' | 'skip'
+  allow_sensitive: boolean
+  status: 'scheduled' | 'running' | 'waiting' | 'paused' | 'off' | 'finished'
+  next_run: string | null
+  last_run_at: string | null
+  last_status: string
+  last_detail: string
+  paused_reason: string
+  paused_detail: string
+  missed: number
+  runs_total: number
+  remaining: number
+  resume_after: string | null
+}
+
+export interface Allowance { start: number; ceiling: number; ramp_per_week: number }
+
+export interface LimitsInfo {
+  allowances: Record<string, Allowance>
+  gap: { min: number; jitter: number }
+  usage: Record<string, { used: number; cap: number }>
+}
+
+export interface NotificationItem {
+  id: string
+  ts: string
+  level: 'info' | 'warning' | 'error'
+  title: string
+  text: string
+  schedule_id: string
+  playbook_id: string
+  run_id: string
+  read: boolean
 }
