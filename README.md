@@ -47,6 +47,13 @@ To run a second copy beside the first (for testing) set `AIBA_PORT` and `AIBA_DA
 - CAPTCHAs are never solved by the agent; it asks you to do them in the live view.
 - The agent's browser can't open this app's own page, so it can't approve its own requests.
 
+## What is kept on disk
+
+Besides your settings and chats, playbook runs are kept in the data folder for 30 days: the steps, what
+each step read, and (only for a run that stopped early) one small picture of the page where it stopped.
+That picture can show whatever was on screen, such as a message or a sign-in page, so treat the data
+folder as private. Delete a playbook's history from its Run history screen, or the folder itself.
+
 ## Developing
 
 | | |
