@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 REQUIRED_MODULES = ("browser_use", "fastapi", "uvicorn", "psutil")
-PORT = 8000
+PORT = int(os.environ.get("AIBA_PORT", "8000"))     # same setting the app reads (for a second copy side by side)
 CREATE_NO_WINDOW = 0x08000000
 START_TIMEOUT = 90           # seconds to wait for the server to answer (first start imports a lot)
 LOG_LIMIT = 200_000          # bytes; a log bigger than this is moved to <name>.old before writing

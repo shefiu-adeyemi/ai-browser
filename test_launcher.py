@@ -221,6 +221,16 @@ class OldInstance(unittest.TestCase):
         self.assertIsNone(launcher.stop_previous_server(self.base, run=lambda *a, **k: result(""), sleep=lambda s: None))
 
 
+class PortSetting(unittest.TestCase):
+    def test_the_launcher_and_the_app_read_the_same_port_setting(self):
+        import subprocess, sys
+        code = "import launcher; print(launcher.PORT)"
+        for value, expected in (("", "8000"), ("8123", "8123")):
+            env = {**__import__("os").environ, "AIBA_PORT": value} if value else {k: v for k, v in __import__("os").environ.items() if k != "AIBA_PORT"}
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(ROOT), env=env).stdout.strip()
+            self.assertEqual(out, expected)
+
+
 class Waiting(unittest.TestCase):
     def wait(self, answers, alive=True, timeout=5):
         t = {"now": 0.0}
