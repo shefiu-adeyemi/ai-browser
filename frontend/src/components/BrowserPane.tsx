@@ -131,8 +131,7 @@ export default function BrowserPane({
 
   // How the page is laid out in the pane. "Fill" zooms in a little (10% to 25%) so the grey bands shrink or
   // vanish, which crops the edges; "Fit" shows the whole page with bands where the shapes differ.
-  const ZOOM = 1.1        // at least this much bigger than Fit
-  const MAX_ZOOM = 1.15   // and at most this much (more would crop too much of a left-aligned page)
+  const MAX_ZOOM = 1.15   // Fill never zooms more than this over Fit (more would crop too much of a left-aligned page)
   const areaRef = useRef<HTMLDivElement>(null)
   const [area, setArea] = useState({ w: 0, h: 0 })
   const [frameSize, setFrameSize] = useState({ w: 1280, h: 800 })
@@ -159,10 +158,10 @@ export default function BrowserPane({
     if (!area.w || !area.h || !fw || !fh) return null
     const contain = Math.min(area.w / fw, area.h / fh)
     const cover = Math.max(area.w / fw, area.h / fh)
-    // Fill: zoom in until the page covers the pane, but by at least 10% and never by more than 25% over
+    // Fill: zoom in until the page covers the pane, but never by more than 15% over
     // "Fit" (on a tall, narrow pane covering it would hide half the page). Whatever is left over is
     // cropped at the bottom and equally on the two sides, never at the top (a page's header must stay visible).
-    const k = fill ? Math.max(contain * ZOOM, Math.min(cover, contain * MAX_ZOOM)) : contain
+    const k = fill ? Math.min(cover, contain * MAX_ZOOM) : contain
     return { w: Math.round(fw * k), h: Math.round(fh * k) }
   })()
   useEffect(() => {

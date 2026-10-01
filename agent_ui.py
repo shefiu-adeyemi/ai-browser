@@ -609,6 +609,22 @@ async def _lifespan(_app):
 
 app = FastAPI(lifespan=_lifespan)
 
+def _page_zoom() -> float:
+    """How much bigger the page's text and elements are drawn (1.1 = 110%, like browser zoom). It works by
+    giving the headless browser a proportionally SMALLER window (1920x1080 / zoom): the live view then
+    shows the same area scaled up, so everything is larger without anything being cropped."""
+    try:
+        z = float(os.getenv("AIBA_PAGE_ZOOM", "1.1"))
+    except ValueError:
+        z = 1.1
+    return min(2.0, max(1.0, z))
+
+
+def _page_viewport() -> dict:
+    z = _page_zoom()
+    return {"width": round(1920 / z), "height": round(1080 / z)}
+
+
 def _make_session() -> BrowserSession:
     # Keep Chromium's sandbox and web security (same-origin policy) ON: this browser
     # holds logged-in sessions and renders untrusted pages driven by an LLM.
@@ -629,6 +645,7 @@ def _make_session() -> BrowserSession:
         user_data_dir=app_paths.UI_PROFILE_DIR,
         disable_security=False,
         wait_between_actions=0.8,
+        viewport=_page_viewport(),
         # No user_agent override: a hard-coded "Chrome/131" next to a different real Chromium build
         # is itself a bot signal, and the TLS/client-hint fingerprint would contradict it.
     )

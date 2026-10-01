@@ -107,6 +107,22 @@ class Shell(unittest.IsolatedAsyncioTestCase):
                 order.append("running")
         self.assertEqual(order, ["up", "running", "down"])
 
+    def test_the_page_is_drawn_larger_by_giving_the_browser_a_smaller_window(self):
+        """Page zoom = a proportionally smaller headless window, so the live view shows everything bigger
+        with nothing cropped."""
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIBA_PAGE_ZOOM", None)
+            self.assertEqual(agent_ui._page_viewport(), {"width": 1745, "height": 982})        # 1920x1080 / 1.1
+        for value, expected in (("1.25", 1536), ("1", 1920), ("5", 960), ("0.2", 1920), ("junk", 1745)):
+            with mock.patch.dict(os.environ, {"AIBA_PAGE_ZOOM": value}):
+                self.assertEqual(agent_ui._page_viewport()["width"], expected, value)   # clamped to 1.0 .. 2.0
+
+    def test_the_browser_session_uses_that_window(self):
+        s = agent_ui._make_session()
+        self.assertEqual(dict(s.browser_profile.viewport), agent_ui._page_viewport())
+
     def test_the_session_cookie_is_per_port(self):
         """Browsers share cookies between ports of one host, so two copies of the app (e.g. port 8000 and a
         test copy) overwrote each other's token and logged each other out."""
