@@ -89,7 +89,7 @@ export default function BrowserChrome({ state, currentUrl, locked, controlling, 
   return (
     <div className="flex-shrink-0" style={{ background: 'rgba(255,255,255,0.88)', backdropFilter: 'blur(12px)', borderBottom: '1px solid rgba(0,0,0,0.07)' }}>
       {/* Tabs */}
-      <div role="tablist" aria-label="Browser tabs" className="flex items-end gap-1 overflow-x-auto px-3 pt-1.5 scrollbar-thin">
+      <div role="tablist" aria-label="Browser tabs" className="flex items-end gap-0.5 overflow-x-auto bg-gray-200/80 px-3 pt-2 scrollbar-thin">
         {tabs.map((t) => {
           const active = t.id === state?.active
           return (
@@ -107,8 +107,10 @@ export default function BrowserChrome({ state, currentUrl, locked, controlling, 
                 }
               }}
               className={cn(
-                'group flex h-7 min-w-[90px] max-w-[190px] items-center gap-1.5 rounded-t-lg px-2.5 text-[11.5px]',
-                active ? 'bg-white text-gray-800 shadow-[0_-1px_0_rgba(0,0,0,0.06)]' : 'cursor-pointer text-gray-500 hover:bg-black/5',
+                'group flex h-8 min-w-[110px] max-w-[200px] items-center gap-1.5 rounded-t-lg border-t-2 px-3 text-[12px]',
+                active
+                  ? 'border-brand bg-white font-semibold text-gray-900 shadow-[0_-2px_6px_rgba(0,0,0,0.08)]'
+                  : 'cursor-pointer border-transparent bg-gray-300/50 text-gray-600 hover:bg-gray-100',
                 locked && !active && 'cursor-not-allowed opacity-70',
               )}
             >

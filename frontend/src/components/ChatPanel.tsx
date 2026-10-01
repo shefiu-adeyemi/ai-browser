@@ -1486,10 +1486,10 @@ export default function ChatPanel({
                   aria-selected={tab === t.value}
                   onClick={() => setTab(t.value)}
                   className={cn(
-                    'flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium border-b-2 -mb-px transition-all',
+                    'flex items-center gap-1.5 rounded-t-lg px-4 py-2.5 text-[13px] border-b-[3px] -mb-px transition-all',
                     tab === t.value
-                      ? 'border-brand text-brand'
-                      : 'border-transparent text-gray-500 hover:text-gray-700',
+                      ? 'border-brand bg-brand-tint font-semibold text-brand'
+                      : 'border-transparent font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-800',
                   )}
                 >
                   <t.icon size={13} />

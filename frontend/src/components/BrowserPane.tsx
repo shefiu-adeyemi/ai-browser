@@ -161,7 +161,7 @@ export default function BrowserPane({
     const cover = Math.max(area.w / fw, area.h / fh)
     // Fill: zoom in until the page covers the pane, but by at least 10% and never by more than 25% over
     // "Fit" (on a tall, narrow pane covering it would hide half the page). Whatever is left over is
-    // cropped equally on both sides.
+    // cropped at the bottom and equally on the two sides, never at the top (a page's header must stay visible).
     const k = fill ? Math.max(contain * ZOOM, Math.min(cover, contain * MAX_ZOOM)) : contain
     return { w: Math.round(fw * k), h: Math.round(fh * k) }
   })()
@@ -331,7 +331,7 @@ export default function BrowserPane({
       {banner}
 
       {/* ── Viewport ── */}
-      <div ref={areaRef} className="flex-1 min-h-0 flex items-center justify-center overflow-hidden relative">
+      <div ref={areaRef} className={cn('flex-1 min-h-0 flex justify-center overflow-hidden relative', fill ? 'items-start' : 'items-center')}>
         <canvas
             ref={canvasRef}
             tabIndex={0}
