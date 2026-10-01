@@ -32,6 +32,8 @@ def _default_data_dir() -> Path:
 DATA_DIR             = _default_data_dir()
 ENV_PATH             = DATA_DIR / ".env"
 SESSIONS_DIR         = DATA_DIR / "sessions"
+PLAYBOOKS_DIR        = DATA_DIR / "playbooks"
+PLAYBOOK_RUNS_DIR    = DATA_DIR / "playbook_runs"
 UI_PROFILE_DIR       = DATA_DIR / "profiles" / "ui"          # browser used by the web UI
 LINKEDIN_PROFILE_DIR = DATA_DIR / "profiles" / "linkedin"    # browser used by linkedin_agent.py
 LAST_URL_FILE        = DATA_DIR / "last_url"

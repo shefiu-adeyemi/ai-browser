@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ApprovalRequest } from '@/types'
 
 interface Props {
@@ -10,14 +10,20 @@ interface Props {
 }
 
 /**
- * Blocks the agent until the user answers. "approve" = allow/deny one action;
- * "handoff" = the user does something in the browser pane (e.g. a CAPTCHA) and continues.
- * No answer in `timeout` seconds counts as a denial on the server, so we count down here.
+ * Blocks the agent until the user answers. No answer in `timeout` seconds counts as a denial on the
+ * server, so we count down here.
+ *
+ *  - "approve" (allow or deny ONE action) is a card in the chat panel, above the task box. The page
+ *    stays visible and undimmed, because the user has to look at it to decide.
+ *  - "handoff" (the user does something in the browser, e.g. a CAPTCHA) is a banner on top of the
+ *    browser view, where the user's attention and hands already are.
  */
 export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
   const [left, setLeft] = useState(request.timeout)
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const denyRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     setLeft(request.timeout)
@@ -28,6 +34,18 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
   }, [request.id, request.timeout])
 
   const handoff = request.kind === 'handoff'
+
+  // An approval takes the focus, on the SAFE button: a stray Enter or Space must never send, post or
+  // buy. Focus goes back to where it was afterwards. A hand-off does not steal focus: the user is
+  // about to click in the browser view.
+  useEffect(() => {
+    if (handoff) return
+    const before = document.activeElement as HTMLElement | null
+    denyRef.current?.focus()
+    cardRef.current?.scrollIntoView({ block: 'nearest' })
+    return () => before?.focus?.()
+  }, [request.id, handoff])
+
   const answer = async (allow: boolean) => {
     setSending(true)
     setFailed(false)
@@ -37,21 +55,71 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
       setFailed(true)   // keep the prompt up: the agent is still waiting for this answer
     }
   }
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!handoff && e.key === 'Escape' && !sending) {
+      e.preventDefault()
+      answer(false)
+    }
+  }
+
+  const label = `${handoff ? 'Agent needs your help' : 'Approval needed'}${step ? ` \u00b7 step ${step}` : ''} \u00b7 ${left}s`
+
+  const buttons = (
+    <div className={handoff ? 'flex flex-shrink-0 items-center gap-2' : 'mt-3 flex justify-end gap-2'}>
+      <button
+        ref={denyRef}
+        disabled={sending}
+        onClick={() => answer(false)}
+        className="rounded-md disabled:opacity-50 border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+      >
+        {handoff ? 'Skip' : 'Deny'}
+      </button>
+      <button
+        disabled={sending}
+        onClick={() => answer(true)}
+        className="rounded-md disabled:opacity-50 bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+      >
+        {handoff ? "I'm done \u2014 continue" : 'Approve'}
+      </button>
+    </div>
+  )
+
+  const problem = failed && (
+    <p className="mt-2 text-xs font-medium text-red-600">
+      {"Couldn't reach the agent \u2014 check the server is running, then try again."}
+    </p>
+  )
+
+  if (handoff) {
+    return (
+      <div
+        role="status"
+        aria-labelledby="approval-title"
+        className="flex flex-shrink-0 items-center gap-4 border-b border-amber-300 bg-amber-50 px-4 py-2.5"
+      >
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">{label}</p>
+          <p id="approval-title" className="truncate text-sm font-semibold text-gray-900" title={request.title}>
+            {request.title}
+          </p>
+          {request.detail && <p className="truncate text-xs text-gray-600" title={request.detail}>{request.detail}</p>}
+          {problem}
+        </div>
+        {buttons}
+      </div>
+    )
+  }
+
   return (
-    // An approval is modal (dimmed, centred). A hand-off ("solve this CAPTCHA") is not: the user must
-    // be able to click in the browser pane, so the page stays clickable and the card sits at the bottom.
-    <div className={handoff
-      ? 'pointer-events-none fixed inset-0 z-50 flex items-end justify-center p-4'
-      : 'fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4'}>
     <div
+      ref={cardRef}
+      onKeyDown={onKeyDown}
       role="alertdialog"
-      aria-modal={!handoff}
       aria-labelledby="approval-title"
-      className="pointer-events-auto w-[520px] max-w-full rounded-xl border border-amber-300 bg-amber-50 p-4 shadow-xl"
+      className="mx-4 mb-2 flex-shrink-0 rounded-xl border border-amber-300 bg-amber-50 p-3.5 shadow-sm"
     >
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
-        {handoff ? 'Agent needs your help' : 'Approval needed'}{step ? ` · step ${step}` : ''} · {left}s
-      </p>
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">{label}</p>
       <p id="approval-title" className="mt-1 text-sm font-semibold text-gray-900 break-words">
         {request.title}
       </p>
@@ -61,29 +129,8 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
         </p>
       )}
       {request.url && <p className="mt-1 truncate text-[11px] text-gray-500">{request.url}</p>}
-      {failed && (
-        <p className="mt-2 text-xs font-medium text-red-600">
-          Couldn't reach the agent — check the server is running, then try again.
-        </p>
-      )}
-      <div className="mt-3 flex justify-end gap-2">
-        <button
-          disabled={sending}
-          onClick={() => answer(false)}
-          className="rounded-md disabled:opacity-50 border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-        >
-          {handoff ? 'Skip' : 'Deny'}
-        </button>
-        <button
-          autoFocus
-          disabled={sending}
-          onClick={() => answer(true)}
-          className="rounded-md disabled:opacity-50 bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
-        >
-          {handoff ? "I'm done — continue" : 'Approve'}
-        </button>
-      </div>
-    </div>
+      {problem}
+      {buttons}
     </div>
   )
 }

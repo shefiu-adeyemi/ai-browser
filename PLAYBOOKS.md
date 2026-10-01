@@ -1,4 +1,4 @@
-# Playbooks: design (approved, not yet built)
+# Playbooks: design (approved; phases 1 and 2 built, see the status sections at the end)
 
 Full plan = this file (core: recording, approval policy, first playbook, build order) plus
 PLAYBOOKS_ROADMAP.md (scrape + batch, change monitoring + notifications, human checkpoints, natural
@@ -90,3 +90,82 @@ writes a readable log.
 4. Self-heal, then teach mode, then hybrid AI steps/loops/conditions, then library UI.
 
 Open risk: browser-use replay reliability on real sites is untested; prototype before committing.
+
+
+## Phase 1 status (built and tested)
+Built: the playbook format (`playbook.py`), storage with version history/undo (`playbook_store.py`), the
+recorder that turns a finished AI run into a draft (`playbook_recorder.py`), the API (`/playbooks`,
+`/playbooks/draft`, `/playbooks/variable`, `/playbooks/{id}`, `/playbooks/{id}/restore`) and the
+Playbooks dialog in the UI (save the last run: review steps with AI/no-AI badges, make inputs, approve,
+save; library with delete). Tests: `test_playbook*.py`, plus the opt-in real-browser
+`test_playbook_recorder_browser.py`.
+
+Facts learned from a real browser-use run (they shaped the recorder):
+- Element indexes are DOM node ids (e.g. 24, 25, 36), not 1, 2, 3, so a saved index means nothing later;
+  only the fingerprint (hashes, accessible name, attributes, XPath) is stored.
+- A click on a missing element returns NO error, only the message "Element index N not available", and
+  has no recorded element; the recorder treats both as a failed step and leaves it out (with a note).
+- browser-use opens a URL found in the task by itself ("Initial navigation"); a repeated open of the same
+  page is merged into one step.
+- Repeated clicks on the same element are kept (they may be paging through results) and flagged.
+
+Not built yet (phase 2 onward): the player (replay through `GuardedTools`), running with variable values,
+scheduler, checkpoints, self-heal, scrape + batch, monitoring, natural-language drafting, model tiers.
+Known limits of drafts (SUPERSEDED, see "Limits pass" below): searches replayed exactly; tab switches and
+hand-offs were not recorded.
+
+
+## Phase 2 status (built and tested)
+Built: the element matcher (`playbook_match.py`), the player (`playbook_player.py`), run records
+(`playbook_runs.py`), the run endpoints (`POST /playbooks/{id}/run`, `GET /playbooks/{id}/runs[/{run}]`),
+`run_playbook_task` in `agent_ui.py` and the Run form in the Playbooks dialog. A run happens in the
+current chat through the same TaskController, GuardedTools, approval prompts and live view as an AI run,
+and is recorded step by step. Tests: `test_playbook_match.py`, `test_playbook_player.py` (fake page),
+`test_playbook_runs.py`, `test_playbook_runs_app.py`, and the opt-in real-browser
+`test_playbook_player_browser.py` (record with a scripted fake LLM, save, replay with a new input: no
+model call, a pre-approved Send runs without a prompt, an unapproved one asks and a "no" stops the run,
+Stop and a vanished element are recorded).
+
+How a step runs: the fingerprint is matched against the live page (exact hash, stable hash, identity
+attribute, XPath, attributes, visible name; ambiguity is never guessed), then the action goes through
+GuardedTools. The guard runs in "ask" mode always; the player's approver answers for it: a step the user
+approved is pre-approved only if the element found is a HIGH confidence match (and an Enter key only if
+the step before it was), otherwise the user is asked (attended) or the run stops "needs you" (unattended,
+supported by the player but not yet reachable from the UI). A block is final. Sites a run may visit are
+recomputed from the steps (never read from the file). A sign-in wall after an open stops the run with
+"needs you". The run stops at the first failing step.
+
+Facts learned: element hashes are 64-bit so they are stored as TEXT (JavaScript would corrupt them);
+browser-use element numbers change between pages and runs, so tests find elements by id (the fake LLM
+now accepts {"click": "send"}); a run's time limit does not count time spent waiting for the user.
+
+Not built yet: scheduler and unattended entry point, checkpoints, self-heal, AI steps (`ai` kind stops
+the run; `extract` works and needs a configured model), run history screen, scrape + batch, monitoring.
+
+
+## Limits pass on phases 1 and 2 (built and tested)
+Addressed:
+- **Searches can vary.** A `search` step (engine + query) replaces the old recorded search URL; the query can
+  be an input. The address is built from the engine and the URL-encoded query, so a value can never change
+  the site. The engine's site is part of the approved sites.
+- **Manual steps are recorded.** A `handoff` step (from the agent's "ask the user" action, or a password the
+  user typed) shows a banner and waits for "I'm done"; unattended it stops "needs you". An approval never
+  answers for the user. A password literal is still never recorded.
+- **Tabs.** A click that opens a new tab switches to it by itself (verified in a real browser), so only going
+  back or closing needs a `tab` step (by position). A playbook with tab steps starts from a single tab; a
+  recording that began with several tabs gets a warning note. A missing tab stops the run with a message.
+- **iframes and shadow DOM** are matched (verified in a real browser); new-tab links too.
+- **Settling.** After each action the player waits until the page has finished loading and stopped changing
+  (capped at 5 s) instead of a fixed pause.
+- **Sign-in walls** are noticed after ANY step (not only an open). Attended: a hand-off banner, then it checks
+  again; unattended: stops. A playbook that signs in itself or has a handoff step is left alone.
+- **Editing saved playbooks** in the UI: name, remove steps, input labels/defaults/required, approval (can be
+  taken back), older versions with Restore. Damaged files are listed (with a plain reason) and can be deleted.
+- **Run history** screen: past runs per playbook and a step-by-step account of each.
+- **Layout** was checked on screen (the browser pane needs a fixed viewport size to draw screenshots).
+- Request failures show readable text (for example "reload the page" for a lost session cookie).
+
+Still limits (honest list): general `ai` steps stop the run (only `extract` reads with a model); no drag, file
+upload, or JavaScript steps (recorded runs list them as notes); no self-heal (a vanished element stops the run);
+unattended runs are supported by the player but have no scheduler/entry point yet; nothing has been run
+against real LinkedIn (needs a signed-in account and respects its terms); tab positions assume one starting tab.

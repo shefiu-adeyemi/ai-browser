@@ -157,6 +157,42 @@ Later opt-in: CSV/Sheets/webhook exports.
 Build-order placement: 6, 7, 11, 12 join the core/player/scheduler phases (they depend on the run record);
 9 ships with the scheduler; 8 ships with checkpoints; 10 and 13 are polish after scrape + batch.
 
+## Model tiers and router (approved; lessons from Cursor research)
+
+Settings gain three model slots, each a (provider, model) pair picked from the existing provider list
+(`providers.py` stays the single source of truth):
+- **Fast** (low latency, cheap): self-heal element lookups, `extract` steps (`page_extraction_llm`), simple
+  classification, diff summaries, checkpoint text.
+- **Standard** (default): normal chat tasks and AI steps inside playbooks.
+- **Strong** (high capability, slower, dearer): hard reasoning, drafting a playbook from natural language,
+  repairing a step that the fast model failed on, planning.
+
+Selection:
+- **Auto (default):** the router picks the tier per task/step type using a fixed table (above), no extra LLM
+  call to decide. Escalation: a step that fails on Fast is retried once on Standard, then Strong; each
+  escalation is logged and counted in the run cost. Never escalate silently past a per-run cost cap.
+- **Manual:** the existing model selector stays; choosing a model for a chat or playbook pins it and turns
+  the router off for that run. Each playbook AI step may be pinned to a tier.
+- Every AI call records tier, model, tokens and cost in the run record (feeds the cost badge, feature 7).
+- Safety: the guard, approvals and secrets rules are identical for every tier; a cheaper model never gets
+  looser rules. Fall back to one model if only one provider key is set (tiers collapse to that model).
+- Tests: tier table lookup, escalation order and cap, pinned model overrides router, single-key collapse,
+  cost accounting per tier.
+
+## More lessons from the market (planned, to place after the core)
+- **Own the fast path.** Replays are our "tab completion": the frequent, cheap, instant thing. Keep their
+  latency and cost visible.
+- **Predictable pricing and budgets** (feature 7) so there is no surprise bill.
+- **Rules/context file per playbook or site**: plain-text hints the AI steps always receive ("this site's
+  login is on a popup", "ignore cookie banners"), like Cursor's rules files.
+- **Index/knowledge of the user's own playbooks** so natural-language requests reuse an existing playbook
+  instead of drafting a new AI run.
+- **Background runs** that don't block the live view (queue, notify), like Cursor's background agents.
+- **Honest measurement:** record real success rate and time saved per playbook; don't assume savings.
+- **Trust incidents to avoid:** never let the AI state invented facts as results (extractions must come from
+  the page, with the source element); verify before reporting success; no unreviewed outbound actions.
+- **Reduce switching cost:** import/export playbooks as JSON; keep chat and live view unchanged.
+
 ## Decisions (approved by the user)
 - Notifications: in-app + desktop first; email/Telegram later, opt-in.
 - Results stay local only for now; Sheets/webhook exports come later, explicit opt-in per playbook.

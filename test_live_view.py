@@ -72,6 +72,20 @@ class InputMapping(unittest.IsolatedAsyncioTestCase):
         await lv._publish_url(session)
         self.assertEqual(lv.current_url, "http://localhost:8765/")
 
+    async def test_queued_wheel_ticks_are_added_into_one_scroll(self):
+        lv = make()
+        run = asyncio.create_task(lv._input_worker())
+        try:
+            for dy in (100, 120, 80):
+                lv.enqueue_input({"kind": "mouse", "event": "mouseWheel", "x": 5, "y": 6, "deltaX": 0, "deltaY": dy})
+            lv.enqueue_input({"kind": "mouse", "event": "mouseMoved", "x": 1, "y": 1})
+            await asyncio.sleep(0.2)
+        finally:
+            run.cancel()
+        wheels = [p for p in calls(lv, "mouse") if p["type"] == "mouseWheel"]
+        self.assertEqual([w["deltaY"] for w in wheels], [300.0])           # one scroll of the total
+        self.assertEqual([p["type"] for p in calls(lv, "mouse")], ["mouseWheel", "mouseMoved"])
+
     async def test_paste_is_inserted_as_text_and_capped(self):
         lv = make()
         await lv.dispatch_input({"kind": "key", "event": "insertText", "text": "héllo 😀"})

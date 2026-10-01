@@ -156,6 +156,21 @@ class ChatStore:
                 entry["last_duration"] = duration
             self._write_index(entries)
 
+    def rename(self, sid: str, title: str) -> Optional[str]:
+        """Give a chat a name of the user's choosing. Returns the stored title, or None if the chat
+        doesn't exist or the name is empty."""
+        title = " ".join(str(title).split())[:TITLE_LEN]
+        if not title or not self.is_valid_id(sid):
+            return None
+        with self._lock:
+            entries = self._read_index()
+            entry = next((e for e in entries if e["id"] == sid), None)
+            if entry is None:
+                return None
+            entry["title"] = title
+            self._write_index(entries)
+            return title
+
     def delete(self, sid: str) -> bool:
         if not self.is_valid_id(sid):
             return False

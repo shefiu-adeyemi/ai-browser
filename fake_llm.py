@@ -6,12 +6,15 @@ A step is one of:
   {"navigate": "http://..."}         open a URL
   {"wait": 5}                        wait N seconds (use with stop/cancel tests)
   {"click": 3} / {"input": (3,"x")}  element actions by index
+  {"click": "send"} / {"input": ("q","x")}  ...or by the element's id attribute: browser-use numbers
+                                     elements by DOM node, so the number changes between pages and runs
   {"done": "final answer"}           finish the task
   {"raise": "message"}               the LLM call itself fails (API down, bad key ...)
   {"hang": True}                     never answers (a stuck request)
 """
 
 import asyncio
+import re
 from typing import Any
 
 from browser_use.llm.views import ChatInvokeCompletion
@@ -30,6 +33,25 @@ def _action(step: dict) -> dict:
     if "done" in step:
         return {"done": {"text": step["done"], "success": step.get("success", True)}}
     raise ValueError(f"unknown scripted step: {step}")
+
+
+def _index_of(element_id: str, prompt: str) -> int:
+    """The number browser-use gave the element with this id attribute, read from the page listing in
+    the prompt (the LAST match: the system prompt has a few made-up examples before the real page)."""
+    pattern = r"\[(\d+)\]<[^>" + chr(10) + r"]*?\bid=" + re.escape(element_id) + r"\b"
+    found = re.findall(pattern, prompt)
+    if not found:
+        raise ValueError(f"no element with id={element_id!r} in the page the model was shown")
+    return int(found[-1])
+
+
+def _resolve_ids(step: dict, prompt: str) -> dict:
+    step = dict(step)
+    if isinstance(step.get("click"), str):
+        step["click"] = _index_of(step["click"], prompt)
+    if isinstance(step.get("input"), (tuple, list)) and isinstance(step["input"][0], str):
+        step["input"] = (_index_of(step["input"][0], prompt), step["input"][1])
+    return step
 
 
 def _message_text(message: Any) -> str:
@@ -88,6 +110,7 @@ class FakeLLM:
             raise RuntimeError(step["raise"])
         if "hang" in step:
             await asyncio.sleep(3600)
+        step = _resolve_ids(step, prompt)
         payload = {
             "thinking": "scripted",
             "evaluation_previous_goal": "n/a",

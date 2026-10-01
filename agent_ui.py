@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -31,8 +32,14 @@ from approvals import ApprovalBroker
 from browser_cleanup import kill_stale_browsers, trim_tabs
 from chat_store import ChatStore
 from live_view import LiveView
+import playbook as pbk
+from playbook_recorder import draft_from_history
+from playbook_player import PlaybookPlayer, SessionDriver, StepApprover, summarize
+from playbook_runs import RunStore
+from playbook_store import PlaybookConflict, PlaybookInvalid, PlaybookNotFound, PlaybookStore
 from run_outcome import assess, refinement_prompt, should_retry, Outcome
 from task_control import Busy, TaskController
+from browser_nav import BadAddress, Navigator, Busy as NavBusy
 from ui_feed import UIFeed
 from site_credentials import linkedin_sensitive_data, linkedin_login_instructions
 
@@ -67,6 +74,9 @@ _ctl = TaskController()          # owns running / paused / the run's task handle
 _clients: Set[WebSocket] = set()
 _conversation_history: list[dict] = []  # [{role, content, ts}]
 _current_session_id: str = ""
+# The last finished run of the CURRENT chat, kept so it can be saved as a playbook:
+# {"task", "history", "session_id"}. Replaced by every finished run.
+_last_run: dict | None = None
 
 # ---------------------------------------------------------------------------
 # Session management
@@ -446,15 +456,21 @@ async def _run_guarded(coro) -> None:
         await _broadcast({"type": "status", "text": "error"})
 
 
+def _remember_run(task: str, agent: Agent) -> None:
+    global _last_run
+    _last_run = {"task": task, "history": agent.history, "session_id": _current_session_id}
+
+
 async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: bool = False) -> None:
     """One agent run. Started/stopped only through _ctl (see task_control.py), which owns the
     running/paused flags, so this function never sets them and never touches the browser's
     lifetime."""
-    global _paused_agent
+    global _paused_agent, _last_run
     if max_steps <= 0:
         max_steps = _as_int(os.getenv("MAX_STEPS"), 60, low=1, high=500)
 
     started = datetime.now()
+    _last_run = None        # a new run: an older run must not be offered as "the last run" if this one fails
 
     # Build context from history BEFORE recording this turn. The turn is recorded before the first
     # await, so a Stop that lands at any later point always finds it and keeps the chat balanced.
@@ -520,6 +536,7 @@ async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: boo
             await _broadcast({"type": "status", "text": "error"})
             return
 
+        _remember_run(task, agent)
         text = outcome.result if outcome.result is not None else "(agent finished with no final answer)"
         _conversation_history.append({"role": "agent", "content": outcome.result or "",
                                        "ts": datetime.now().strftime("%H:%M")})
@@ -660,6 +677,82 @@ async def _open_start_page() -> None:
             _log.warning("start page attempt %d failed: %s", attempt + 1, e)
             await asyncio.sleep(1.0)
 
+def _may_browse() -> bool:
+    """Browsing by hand is allowed when the agent is idle, or blocked waiting for a hand-off (e.g. a
+    CAPTCHA). Never while it works or waits on an approval: the page must not change under it."""
+    if not _ctl.running and not _ctl.paused:
+        return True
+    pending = _broker.snapshot()
+    return _ctl.running and bool(pending) and all(p.get("kind") == "handoff" for p in pending)
+
+
+async def _nav_call(fn, *args):
+    try:
+        res = await fn(*args)
+    except NavBusy as e:
+        return JSONResponse({"ok": False, "reason": str(e), "busy": True}, status_code=409)
+    except BadAddress as e:
+        return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
+    except Exception as e:
+        _log.warning("browser toolbar action failed: %s", e)
+        return JSONResponse({"ok": False, "reason": f"The browser couldn't do that: {str(e)[:200]}"}, status_code=502)
+    _state_cache["value"] = None          # the page just changed: the next poll must look again
+    return {"ok": True, "url": res} if isinstance(res, str) else {"ok": True}
+
+
+_state_cache: dict = {"at": 0.0, "locked": None, "value": None}
+
+
+@app.get("/browser/state")
+async def browser_state():
+    """Polled by every open UI every couple of seconds, so a result is reused for a second: several
+    windows (or one window plus an action's refresh) cost one set of browser lookups, not one each.
+    While the agent works the back / forward lookup is skipped, as those buttons are disabled then."""
+    locked = not _may_browse()
+    now = time.monotonic()
+    c = _state_cache
+    if c["value"] is not None and c["locked"] == locked and now - c["at"] < 1.0:
+        return c["value"]
+    value = {**await _nav.state(with_history=not locked), "locked": locked}
+    c.update(at=time.monotonic(), locked=locked, value=value)
+    return value
+
+
+@app.post("/browser/go")
+async def browser_go(body: dict):
+    return await _nav_call(_nav.go, str(body.get("text", "")), bool(body.get("new_tab")))
+
+
+@app.post("/browser/back")
+async def browser_back():
+    return await _nav_call(_nav.back)
+
+
+@app.post("/browser/forward")
+async def browser_forward():
+    return await _nav_call(_nav.forward)
+
+
+@app.post("/browser/reload")
+async def browser_reload():
+    return await _nav_call(_nav.reload)
+
+
+@app.post("/browser/tabs/new")
+async def browser_new_tab():
+    return await _nav_call(_nav.new_tab)
+
+
+@app.post("/browser/tabs/switch")
+async def browser_switch_tab(body: dict):
+    return await _nav_call(_nav.switch, str(body.get("id", "")))
+
+
+@app.post("/browser/tabs/close")
+async def browser_close_tab(body: dict):
+    return await _nav_call(_nav.close, str(body.get("id", "")))
+
+
 @app.get("/favicon.svg")
 async def favicon():
     svg = FRONTEND_DIST / "favicon.svg"
@@ -688,11 +781,12 @@ _log = logging.getLogger(__name__)
 # UI and (b) present a per-launch token, delivered to the UI as an HttpOnly,
 # SameSite=Strict cookie when it loads "/". Other sites can't read that cookie.
 # ---------------------------------------------------------------------------
-PORT = 8000
+PORT = int(os.getenv("AIBA_PORT", "8000"))   # override only for running a second copy side by side
 _ALLOWED_HOSTS = {f"localhost:{PORT}", f"127.0.0.1:{PORT}"}
 _ALLOWED_ORIGINS = {f"http://{h}" for h in _ALLOWED_HOSTS}
+_nav = Navigator(lambda: _session, frozenset(_ALLOWED_HOSTS), lambda: _may_browse())   # the UI's browser toolbar
 _AUTH_TOKEN  = secrets.token_urlsafe(32)
-_COOKIE_NAME = "aba_token"
+_COOKIE_NAME  = f"aba_token_{PORT}"   # cookies are shared across ports on one host: two copies must not overwrite each other's
 _PUBLIC_PATHS = ("/", "/favicon.svg")
 
 def _origin_allowed(origin: str | None, host: str | None) -> bool:
@@ -921,6 +1015,16 @@ async def switch_session(sid: str):
     await _broadcast({"type": "session_changed", "id": sid, "history": _conversation_history})
     return {"ok": True, "history": _conversation_history}
 
+@app.post("/sessions/{sid}/rename")
+async def rename_session(sid: str, body: dict):
+    if not ChatStore.is_valid_id(sid):
+        return _bad_session_id()
+    title = _store.rename(sid, body.get("title", "") if isinstance(body, dict) else "")
+    if title is None:
+        return {"ok": False, "reason": "not found or empty name"}
+    return {"ok": True, "title": title}
+
+
 @app.delete("/sessions/{sid}")
 async def delete_session(sid: str):
     global _current_session_id, _conversation_history
@@ -937,6 +1041,250 @@ async def delete_session(sid: str):
         await _broadcast({"type": "session_changed", "id": _current_session_id, "history": []})
         await _broadcast({"type": "status", "text": "idle"})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Playbooks (see PLAYBOOKS.md)
+# ---------------------------------------------------------------------------
+_playbooks = PlaybookStore(app_paths.PLAYBOOKS_DIR)
+_runs = RunStore(app_paths.PLAYBOOK_RUNS_DIR)
+
+
+async def run_playbook_task(pb: pbk.Playbook, values: dict, run_id: str) -> None:
+    """Replay a playbook in the shared browser, in the current chat. Started and stopped only through
+    _ctl, like an AI run, so Stop, the live view and the approval prompts all work the same way.
+    Every action goes through GuardedTools (see playbook_player.py): a playbook step is no less safe
+    than an AI step."""
+    global _last_run
+    _last_run = None
+    started = datetime.now()
+    shown = "".join(f"\n  {k}: {str(v)[:80]}" for k, v in values.items())
+    _conversation_history.append({"role": "user", "content": f"▶ Run playbook \"{pb.name}\"{shown}",
+                                   "ts": started.strftime("%H:%M")})
+    record = {"run_id": run_id, "playbook_version": pb.version, "started_at": started.timestamp(),
+              "attended": True, "inputs": values, "status": "failed", "error": "", "steps": [],
+              "outputs": [], "seconds": 0.0, "finished_at": 0.0}
+
+    def finish_record(status: str, error: str, result=None) -> None:
+        record.update(status=status, error=error, finished_at=datetime.now().timestamp(),
+                      seconds=round(datetime.now().timestamp() - record["started_at"], 1))
+        if result is not None:
+            record.update(steps=result.to_dict()["steps"], outputs=result.outputs)
+        try:
+            _runs.save(pb.id, record)
+        except Exception:
+            _log.exception("could not save the run record")
+
+    try:
+        await _broadcast({"type": "status", "text": "running"})
+        await _persist()
+        session = await _ensure_session()
+        # Tab steps count tabs from the first one, so a playbook that has them starts from a single tab.
+        await trim_tabs(session, keep=1) if any(s.kind == "tab" for s in pb.steps) else await trim_tabs(session)
+        sensitive = linkedin_sensitive_data()
+        approver = StepApprover(_broker, attended=True)
+        # mode "ask" always: the player's approver decides (pre-approved step, or the user), so a
+        # hand-edited APPROVAL_MODE can never make a playbook run looser than it was approved.
+        tools = GuardedTools(approver, mode="ask",
+                             secret_names={k for v in (sensitive or {}).values() for k in v},
+                             notify=_broadcast, task=pb.name)
+        llm = None
+        if any(s.kind == "extract" for s in pb.steps):
+            try:
+                llm = get_llm()
+            except Exception as e:                  # the step then fails with a clear message
+                _log.warning("no model for a playbook extract step: %s", e)
+
+        async def say(text: str) -> None:
+            await _broadcast({"type": "action", "text": text})
+
+        player = PlaybookPlayer(SessionDriver(session, tools, sensitive_data=sensitive, llm=llm), approver, notify=say)
+        result = await player.run(pb, values)
+        text = summarize(pb, result)
+        _conversation_history.append({"role": "agent", "content": text, "ts": datetime.now().strftime("%H:%M")})
+        verdict = "pass" if result.status == "done" else "fail"
+        await _persist(verdict=verdict, duration=result.seconds)
+        finish_record(result.status, result.error, result)
+        await _broadcast({"type": "result", "text": text, "verdict": verdict, "reason": result.error,
+                          "retries": 0, "duration": result.seconds})
+        await _broadcast({"type": "status", "text": "done" if result.status == "done" else "error"})
+    except asyncio.CancelledError:
+        finish_record("stopped", "Stopped by you.")
+        await _record_stopped()
+        raise
+    except Exception as e:
+        if _ctl.stop_requested:
+            finish_record("stopped", "Stopped by you.")
+            await _record_stopped()
+            return
+        err = str(e)
+        _log.exception("playbook run crashed")
+        _conversation_history.append({"role": "agent", "content": f"(failed: {err[:300]})",
+                                       "ts": datetime.now().strftime("%H:%M")})
+        finish_record("failed", err[:300])
+        await _persist()
+        await _broadcast({"type": "action", "text": f"[Error] {err}"})
+        await _broadcast({"type": "status", "text": "error"})
+
+
+def _pb_error(status: int, reason: str, **extra) -> JSONResponse:
+    return JSONResponse({"ok": False, "reason": reason, **extra}, status_code=status)
+
+
+def _pb_id_or_error(pid: str) -> JSONResponse | None:
+    return None if PlaybookStore.is_valid_id(pid) else _pb_error(400, "invalid playbook id")
+
+
+@app.get("/playbooks")
+async def list_playbooks():
+    try:
+        return {"ok": True, "playbooks": _playbooks.summaries(), "damaged": _playbooks.damaged()}
+    except OSError as e:
+        _log.exception("could not list playbooks")
+        return _pb_error(500, f"Couldn't read the playbooks folder ({type(e).__name__}: {e}).")
+
+
+@app.post("/playbooks/draft")
+async def draft_playbook():
+    """A draft (nothing stored) built from the last finished run of this chat."""
+    run = _last_run
+    if run is None or run["session_id"] != _current_session_id:
+        return _pb_error(404, "There is no finished run in this chat to save as a playbook yet.")
+    try:
+        draft = draft_from_history(run["history"], task=run["task"], sensitive_data=linkedin_sensitive_data())
+    except Exception as e:
+        _log.exception("could not build a playbook draft")
+        return _pb_error(500, f"Could not read the run: {type(e).__name__}: {e}")
+    return {"ok": True, **draft.to_dict()}
+
+
+@app.post("/playbooks/variable")
+async def playbook_variable(body: dict):
+    """Turn one literal value into a variable. Pure: returns the changed playbook, stores nothing."""
+    try:
+        pb = pbk.Playbook.model_validate(body.get("playbook") or {})
+        out = pbk.make_variable(pb, str(body.get("step_id", "")), str(body.get("field", "")),
+                                str(body.get("name", "")), str(body.get("type", "")),
+                                [str(h) for h in (body.get("allowed_hosts") or [])], str(body.get("label", "")))
+    except ValueError as e:                       # includes pydantic's ValidationError
+        return _pb_error(400, str(e)[:300])
+    return {"ok": True, "playbook": out.model_dump(mode="json")}
+
+
+@app.post("/playbooks")
+async def save_playbook(body: dict):
+    try:
+        pb = pbk.Playbook.model_validate(body.get("playbook") or {})
+    except ValueError as e:
+        return _pb_error(400, "That is not a valid playbook.", problems=[str(e)[:300]])
+    expected = body.get("expected_version")
+    try:
+        saved = _playbooks.save(pb, expected_version=expected if type(expected) is int else None,
+                                approve=body.get("approve") is True, revoke=body.get("revoke") is True)
+    except PlaybookInvalid as e:
+        return _pb_error(400, "The playbook has problems.", problems=e.problems)
+    except PlaybookConflict as e:
+        return _pb_error(409, str(e))
+    except PlaybookNotFound:
+        return _pb_error(404, "That playbook no longer exists.")
+    except OSError as e:
+        _log.exception("could not save a playbook")
+        return _pb_error(500, f"Couldn't write the playbook to disk ({type(e).__name__}: {e}).")
+    return {"ok": True, "playbook": saved.model_dump(mode="json"), "approved": pbk.is_approved(saved)}
+
+
+@app.post("/playbooks/{pid}/run")
+async def run_playbook(pid: str, body: dict):
+    """Start a run in this chat. The inputs are checked here, so a mistake is shown on the form
+    instead of becoming a run that stops at once."""
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    try:
+        pb = _playbooks.get(pid)
+    except PlaybookNotFound:
+        return _pb_error(404, "not found")
+    except PlaybookInvalid as e:
+        return _pb_error(422, "This playbook can't be run.", problems=e.problems)
+    except OSError as e:
+        return _pb_error(500, f"Couldn't read it ({type(e).__name__}: {e}).")
+    supplied = body.get("inputs") if isinstance(body.get("inputs"), dict) else {}
+    values, errors = pbk.bind_values(pb, supplied)
+    if errors:
+        return _pb_error(400, "Check the inputs.", problems=errors)
+    run_id = RunStore.new_id()
+    try:
+        _ctl.start(lambda: _run_guarded(run_playbook_task(pb, values, run_id)),
+                   origin=f"Run playbook: {pb.name}", fmt="auto")
+    except Busy as e:
+        return _pb_error(409, str(e))
+    return {"ok": True, "run_id": run_id}
+
+
+@app.get("/playbooks/{pid}/runs")
+async def playbook_runs(pid: str):
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    return {"ok": True, "runs": _runs.recent(pid)}
+
+
+@app.get("/playbooks/{pid}/runs/{rid}")
+async def playbook_run(pid: str, rid: str):
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    if not RunStore.is_valid_id(rid):
+        return _pb_error(400, "invalid run id")
+    rec = _runs.get(pid, rid)
+    return {"ok": True, "run": rec} if rec is not None else _pb_error(404, "not found")
+
+
+@app.get("/playbooks/{pid}")
+async def get_playbook(pid: str):
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    try:
+        pb = _playbooks.get(pid)
+    except PlaybookNotFound:
+        return _pb_error(404, "not found")
+    except PlaybookInvalid as e:
+        return _pb_error(422, "This playbook can't be read.", problems=e.problems)
+    except OSError as e:
+        _log.exception("could not read a playbook")
+        return _pb_error(500, f"Couldn't read it ({type(e).__name__}: {e}).")
+    return {"ok": True, "playbook": pb.model_dump(mode="json"), "approved": pbk.is_approved(pb),
+            "versions": _playbooks.versions(pid)}
+
+
+@app.delete("/playbooks/{pid}")
+async def delete_playbook(pid: str):
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    try:
+        deleted = _playbooks.delete(pid)
+        _runs.delete_playbook_runs(pid)
+        return {"ok": True, "deleted": deleted}
+    except OSError as e:
+        _log.exception("could not delete a playbook")
+        return _pb_error(500, f"Couldn't delete it ({type(e).__name__}: {e}).")
+
+
+@app.post("/playbooks/{pid}/restore")
+async def restore_playbook(pid: str, body: dict):
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    try:
+        version = int(body.get("version"))
+    except (TypeError, ValueError):
+        return _pb_error(400, "version must be a number")
+    try:
+        pb = _playbooks.restore(pid, version)
+    except PlaybookNotFound:
+        return _pb_error(404, "not found")
+    except PlaybookInvalid as e:
+        return _pb_error(422, "That version can't be restored.", problems=e.problems)
+    except OSError as e:
+        _log.exception("could not restore a playbook")
+        return _pb_error(500, f"Couldn't restore it ({type(e).__name__}: {e}).")
+    return {"ok": True, "playbook": pb.model_dump(mode="json"), "approved": False}
 
 
 # Serve compiled React frontend assets (must come after all API routes)

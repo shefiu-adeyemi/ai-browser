@@ -206,6 +206,16 @@ class LiveView:
                 while (msg.get("event") == "mouseMoved" and self._inputs
                        and self._inputs[0].get("event") == "mouseMoved"):
                     msg = self._inputs.popleft()
+                # Wheel movements that queued up while the page was busy are added together: one scroll
+                # of the total distance, not a slow crawl through every tick.
+                if msg.get("event") == "mouseWheel":
+                    total_x, total_y = _num(msg.get("deltaX")), _num(msg.get("deltaY"))
+                    while self._inputs and self._inputs[0].get("event") == "mouseWheel":
+                        more = self._inputs.popleft()
+                        total_x += _num(more.get("deltaX"))
+                        total_y += _num(more.get("deltaY"))
+                        msg = {**more}
+                    msg = {**msg, "deltaX": total_x, "deltaY": total_y}
                 await self.dispatch_input(msg)
 
     async def dispatch_input(self, msg: dict) -> None:

@@ -1,17 +1,21 @@
 import {
-  useState, useRef, useEffect, useCallback, KeyboardEvent, ChangeEvent,
+  useState, useRef, useEffect, useCallback, lazy, Suspense, KeyboardEvent, ChangeEvent, type ReactNode,
 } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
-import { cn, formatDuration, formatDate } from '@/lib/utils'
+import CopyButton from '@/components/CopyButton'
+import { cn, formatDuration, formatDate, plural } from '@/lib/utils'
 import {
   Plus, Settings, ChevronDown, Square, Trash2, ChevronRight,
   Briefcase, Newspaper, ShoppingBag, MapPin, ArrowUp, X,
-  MessageSquare, History, Eye, EyeOff,
+  MessageSquare, History, Eye, EyeOff, Pencil, Search, Copy, ChevronsRight, Maximize2, Minimize2, Globe, Sparkles, List, Table2, BookMarked,
 } from 'lucide-react'
 import type { Turn, Status, SessionInfo, Settings as SettingsType, FormatOption, Verdict } from '@/types'
+
+// The markdown renderer is the biggest single dependency and only matters once there is an answer to show.
+const Markdown = lazy(() => import('@/components/Markdown'))
 
 // 'unknown' (no independent check was possible) shows nothing rather than a made-up rating
 const hasVerdict = (v: Verdict | undefined): v is 'pass' | 'fail' => v === 'pass' || v === 'fail'
@@ -21,16 +25,25 @@ const hasVerdict = (v: Verdict | undefined): v is 'pass' | 'fail' => v === 'pass
 interface ChatPanelProps {
   messages: Turn[]
   status: Status
+  connected: boolean
   currentSessionId: string | null
   sessions: SessionInfo[]
   settingsOpen: boolean
   onSettingsOpen: (v: boolean) => void
+  onOpenPlaybooks: () => void
   onSendTask: (task: string, fmt: FormatOption) => void
   onStop: () => void
   onContinue: (extraSteps: number) => void
+  onRetry: () => void
   onNewSession: () => void
   onSwitchSession: (id: string) => void
   onDeleteSession: (id: string) => void
+  onRenameSession: (id: string, title: string) => void
+  approvalSlot?: ReactNode        // a pending approval card, shown just above the task box
+  page?: { url: string; title: string } | null   // the page open in the browser, for the quick actions
+  wide?: boolean
+  onToggleWide?: () => void
+  onCollapse?: () => void         // hide this panel (wide windows only)
 }
 
 // ─── Brand avatar for agent messages ─────────────────────────────────────────
@@ -44,6 +57,11 @@ function AgentAvatar() {
 // ─── Thinking dots ─────────────────────────────────────────────────────────────
 
 function ThinkingDots({ stepCount, logs }: { stepCount?: number; logs?: string[] }) {
+  const [open, setOpen] = useState(false)
+  const listRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (open && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
+  }, [open, logs?.length])
   return (
     <div className="space-y-2 py-1">
       <div className="flex items-center gap-2.5">
@@ -64,9 +82,32 @@ function ThinkingDots({ stepCount, logs }: { stepCount?: number; logs?: string[]
         )}
       </div>
       {logs && logs.length > 0 && (
-        <p className="text-xs text-gray-400 truncate max-w-[260px] pl-[22px]">
-          {logs[logs.length - 1]}
-        </p>
+        <div className="pl-[22px]">
+          <button
+            type="button"
+            onClick={() => setOpen(!open)}
+            aria-expanded={open}
+            className="flex max-w-full items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+          >
+            <ChevronRight size={12} className={cn('flex-shrink-0 transition-transform duration-150', open && 'rotate-90')} />
+            <span aria-hidden="true" title={logs[logs.length - 1]} className="truncate max-w-[240px]">
+              {open ? `Details · ${plural(logs.length, 'line')}` : logs[logs.length - 1]}
+            </span>
+          </button>
+          {open && (
+            <div
+              ref={listRef}
+              aria-hidden="true"
+              className="mt-1.5 max-h-40 space-y-0.5 overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-2.5 scrollbar-thin"
+            >
+              {logs.slice(-200).map((log, i) => (
+                <p key={i} title={log} className="truncate font-mono text-[11px] leading-relaxed text-gray-500">
+                  {log}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
@@ -74,8 +115,29 @@ function ThinkingDots({ stepCount, logs }: { stepCount?: number; logs?: string[]
 
 // ─── Message bubble ────────────────────────────────────────────────────────────
 
-function MessageBubble({ turn }: { turn: Turn }) {
+function MessageBubble({
+  turn, onRetry, onOpenSettings,
+}: {
+  turn: Turn
+  onRetry?: () => void           // only given for the latest failed run
+  onOpenSettings: () => void
+}) {
   const [logsOpen, setLogsOpen] = useState(false)
+  const [openLines, setOpenLines] = useState<Set<number>>(new Set())
+  const [copied, setCopied] = useState(false)
+  const toggleLine = (i: number) =>
+    setOpenLines((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(i)) next.add(i)
+      return next
+    })
+  const copyLogs = async () => {
+    try {
+      await navigator.clipboard.writeText((turn.logs ?? []).join(String.fromCharCode(10)))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* clipboard not available: nothing to do */ }
+  }
 
   if (turn.role === 'system') {
     return (
@@ -113,12 +175,40 @@ function MessageBubble({ turn }: { turn: Turn }) {
           <ThinkingDots stepCount={turn.stepCount} logs={turn.logs} />
         ) : (
           <div className="space-y-2">
-            <p className="text-[14.5px] text-gray-800 leading-relaxed whitespace-pre-wrap">
-              {turn.content || '(no result)'}
-            </p>
+            {turn.error ? (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-3">
+                <p className="text-[14px] leading-relaxed text-red-800 whitespace-pre-wrap">{turn.content}</p>
+                <div className="mt-2.5 flex flex-wrap gap-2">
+                  {/api key|settings|provider|credential/i.test(turn.content) && (
+                    <button
+                      onClick={onOpenSettings}
+                      className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-hover"
+                    >
+                      Open Settings
+                    </button>
+                  )}
+                  {onRetry && (
+                    <button
+                      onClick={onRetry}
+                      className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100"
+                    >
+                      Try again
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              turn.content ? (
+                <Suspense fallback={<p className="text-[14.5px] text-gray-800 whitespace-pre-wrap">{turn.content}</p>}>
+                  <Markdown text={turn.content} />
+                </Suspense>
+              ) : (
+                <p className="text-[14.5px] text-gray-500">(no result)</p>
+              )
+            )}
 
             {/* Independent check + meta row */}
-            {(hasVerdict(turn.verdict) || turn.duration !== undefined) && (
+            {(hasVerdict(turn.verdict) || turn.duration !== undefined || (!turn.error && !!turn.content)) && (
               <div className="flex items-center gap-2 flex-wrap">
                 {hasVerdict(turn.verdict) && (
                   <span
@@ -141,6 +231,7 @@ function MessageBubble({ turn }: { turn: Turn }) {
                     {turn.retries} retr{turn.retries === 1 ? 'y' : 'ies'}
                   </span>
                 )}
+                {!turn.error && !!turn.content && <CopyButton text={turn.content} label="Copy answer" className="ml-auto" />}
               </div>
             )}
             {turn.verdict === 'fail' && turn.reason && (
@@ -158,12 +249,26 @@ function MessageBubble({ turn }: { turn: Turn }) {
                     size={12}
                     className={cn('transition-transform duration-150', logsOpen && 'rotate-90')}
                   />
-                  {turn.logs.length} steps
+                  {turn.stepCount ? `${plural(turn.stepCount, 'step')} · ` : ''}details
                 </button>
                 {logsOpen && (
                   <div className="mt-2 rounded-xl bg-gray-50 border border-gray-100 p-3 max-h-44 overflow-y-auto scrollbar-thin space-y-0.5">
+                    <button
+                      onClick={copyLogs}
+                      className="mb-1 flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+                    >
+                      <Copy size={11} /> {copied ? 'Copied' : 'Copy all'}
+                    </button>
                     {turn.logs.map((log, i) => (
-                      <p key={i} className="text-[11px] text-gray-500 font-mono leading-relaxed">
+                      <p
+                        key={i}
+                        onClick={() => toggleLine(i)}
+                        title={openLines.has(i) ? 'Click to shorten' : 'Click to read the whole line'}
+                        className={cn(
+                          'cursor-pointer text-[11px] text-gray-500 font-mono leading-relaxed',
+                          openLines.has(i) ? 'whitespace-pre-wrap break-words' : 'truncate',
+                        )}
+                      >
                         {log}
                       </p>
                     ))}
@@ -211,7 +316,7 @@ const SUGGESTIONS = [
 
 function WelcomeState({ onSelect }: { onSelect: (p: string) => void }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full px-5 py-8 select-none">
+    <div className="flex flex-col items-center justify-center min-h-full px-5 py-8 select-none">
       <div className="mb-7 text-center">
         <div className="flex justify-center mb-4">
           <img src="/favicon.svg" width="48" height="48" alt="" />
@@ -222,18 +327,20 @@ function WelcomeState({ onSelect }: { onSelect: (p: string) => void }) {
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-2.5 w-full">
+      <div className="flex w-full flex-col gap-1.5">
         {SUGGESTIONS.map((s) => (
           <button
             key={s.prompt}
             onClick={() => onSelect(s.prompt)}
-            className="text-left p-3.5 rounded-xl bg-white border border-gray-100 hover:border-brand/25 hover:bg-brand-tint/50 transition-all duration-150 shadow-subtle group"
+            className="group flex items-center gap-3 rounded-xl border border-gray-100 bg-white px-3 py-2.5 text-left shadow-subtle transition-all duration-150 hover:border-brand/25 hover:bg-brand-tint/50"
           >
-            <div className="w-7 h-7 rounded-lg bg-surface-subtle group-hover:bg-brand/10 flex items-center justify-center mb-2.5 transition-colors">
-              <s.icon size={14} className="text-gray-500 group-hover:text-brand transition-colors" />
-            </div>
-            <p className="text-xs font-semibold text-gray-700 leading-snug">{s.title}</p>
-            <p className="text-xs text-gray-400 mt-0.5 leading-snug">{s.desc}</p>
+            <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-surface-subtle transition-colors group-hover:bg-brand/10">
+              <s.icon size={14} className="text-gray-500 transition-colors group-hover:text-brand" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-xs font-semibold leading-snug text-gray-700">{s.title}</span>
+              <span className="block truncate text-xs leading-snug text-gray-400">{s.desc}</span>
+            </span>
           </button>
         ))}
       </div>
@@ -260,7 +367,10 @@ function FormatDropdown({
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors px-1 py-0.5 rounded">
+        <button
+          aria-label={`Answer format: ${FORMAT_OPTIONS.find((o) => o.value === value)?.label}`}
+          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors px-1 py-0.5 rounded"
+        >
           {FORMAT_OPTIONS.find((o) => o.value === value)?.label}
           <ChevronDown size={11} />
         </button>
@@ -571,6 +681,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
         <h3 className="text-sm font-semibold text-gray-900">Settings</h3>
         <button
           onClick={onClose}
+          aria-label="Close settings"
           className="w-7 h-7 rounded-lg hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
         >
           <X size={15} />
@@ -728,12 +839,27 @@ function HistoryTab({
   currentSessionId,
   onSwitch,
   onDelete,
+  onRename,
 }: {
   sessions: SessionInfo[]
   currentSessionId: string | null
   onSwitch: (id: string) => void
   onDelete: (id: string) => void
+  onRename: (id: string, title: string) => void
 }) {
+  const [query, setQuery] = useState('')
+  const [editing, setEditing] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  // The search box only exists with 4+ chats; a leftover query must not hide the list after deletes.
+  const shown = query.trim() && sessions.length >= 4
+    ? sessions.filter((s) => (s.title || 'Untitled session').toLowerCase().includes(query.trim().toLowerCase()))
+    : sessions
+  const commitRename = (id: string, original: string) => {
+    const t = draft.trim()
+    setEditing(null)
+    if (t && t !== original) onRename(id, t)
+  }
+
   if (sessions.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center flex-1 gap-2 text-gray-400 select-none">
@@ -747,12 +873,25 @@ function HistoryTab({
   return (
     <TooltipProvider>
       <div className="flex-1 overflow-y-auto scrollbar-thin px-3 py-3 space-y-1">
-        {sessions.map((s) => {
+        {sessions.length >= 4 && (
+          <div className="relative mb-2">
+            <Search size={13} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search chats"
+              placeholder="Search chats"
+              className="w-full rounded-xl border border-gray-100 bg-gray-50 py-2 pl-8 pr-3 text-xs text-gray-700 outline-none focus:border-brand/30"
+            />
+          </div>
+        )}
+        {shown.length === 0 && <p className="px-2 py-6 text-center text-xs text-gray-400">No chats match “{query}”.</p>}
+        {shown.map((s) => {
           const active = s.id === currentSessionId
           return (
             <div
               key={s.id}
-              onClick={() => onSwitch(s.id)}
+              onClick={() => editing !== s.id && onSwitch(s.id)}
               className={cn(
                 'group flex items-start gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all',
                 active
@@ -769,20 +908,37 @@ function HistoryTab({
                 <MessageSquare size={13} className={active ? 'text-brand' : 'text-gray-400'} />
               </div>
               <div className="flex-1 min-w-0">
-                <p
-                  className={cn(
-                    'text-xs font-semibold truncate',
-                    active ? 'text-brand' : 'text-gray-700',
-                  )}
-                >
-                  {s.title || 'Untitled session'}
-                </p>
+                {editing === s.id ? (
+                  <input
+                    autoFocus
+                    value={draft}
+                    maxLength={60}
+                    aria-label="Chat name"
+                    onChange={(e) => setDraft(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onBlur={() => commitRename(s.id, s.title)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRename(s.id, s.title)
+                      if (e.key === 'Escape') setEditing(null)
+                    }}
+                    className="w-full rounded-md border border-brand/30 bg-white px-1.5 py-0.5 text-xs font-semibold text-gray-800 outline-none"
+                  />
+                ) : (
+                  <p
+                    className={cn(
+                      'text-xs font-semibold truncate',
+                      active ? 'text-brand' : 'text-gray-700',
+                    )}
+                  >
+                    {s.title || 'Untitled session'}
+                  </p>
+                )}
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <span className="text-[11px] text-gray-400">{formatDate(s.updated_at)}</span>
                   {s.turns > 0 && (
                     <>
                       <span className="text-[11px] text-gray-300">·</span>
-                      <span className="text-[11px] text-gray-400">{s.turns} turns</span>
+                      <span className="text-[11px] text-gray-400">{plural(s.turns, 'turn')}</span>
                     </>
                   )}
                   {s.last_verdict !== undefined && hasVerdict(s.last_verdict) && (
@@ -820,11 +976,28 @@ function HistoryTab({
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
+                    aria-label="Rename chat"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setDraft(s.title || '')
+                      setEditing(s.id)
+                    }}
+                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 w-6 h-6 rounded-lg hover:bg-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-all flex-shrink-0 mt-0.5"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="left">Rename chat</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    aria-label="Delete chat"
                     onClick={(e) => {
                       e.stopPropagation()
                       onDelete(s.id)
                     }}
-                    className="opacity-0 group-hover:opacity-100 w-6 h-6 rounded-lg hover:bg-red-100 flex items-center justify-center text-gray-400 hover:text-red-500 transition-all flex-shrink-0 mt-0.5"
+                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 w-6 h-6 rounded-lg hover:bg-red-100 flex items-center justify-center text-gray-400 hover:text-red-500 transition-all flex-shrink-0 mt-0.5"
                   >
                     <Trash2 size={12} />
                   </button>
@@ -839,6 +1012,131 @@ function HistoryTab({
   )
 }
 
+// ─── Model picker (in the task box) ───────────────────────────────────────────
+
+function ModelPicker({ disabled, refreshKey, onOpenSettings }: { disabled: boolean; refreshKey: number; onOpenSettings: () => void }) {
+  const [settings, setSettings] = useState<SettingsType | null>(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    loadSettings().then(setSettings)
+  }, [refreshKey])
+
+  const providers = settings?.PROVIDERS ?? []
+  const current = providers.find((p) => p.id === settings?.LLM_PROVIDER) ?? providers[0]
+  if (!settings || !current) return null
+  const hasKey = (key: string) => !!(settings as unknown as Record<string, string>)[key]
+  const model = settings.LLM_MODEL || current.default_model
+
+  const choose = async (providerId: string, chosen: string, isDefault: boolean) => {
+    const res = await fetch('/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ LLM_PROVIDER: providerId, LLM_MODEL: isDefault ? '' : chosen }),
+    }).catch(() => null)
+    if (res && res.ok) {
+      setSettings((s) => (s ? { ...s, LLM_PROVIDER: providerId, LLM_MODEL: isDefault ? '' : chosen } : s))
+    } else {
+      setFailed(true)
+      setTimeout(() => setFailed(false), 3000)
+    }
+  }
+
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          disabled={disabled}
+          aria-label={`Model: ${current.label} ${model}`}
+          title={disabled ? 'Stop the task to change the model' : 'Choose the AI model'}
+          className="flex max-w-[170px] items-center gap-1 rounded px-1 py-0.5 text-xs text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <Sparkles size={11} className="flex-shrink-0" />
+          <span className="truncate">{failed ? "Couldn't switch" : `${current.label} · ${model}`}</span>
+          <ChevronDown size={11} className="flex-shrink-0" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          side="top"
+          align="start"
+          sideOffset={6}
+          className="z-50 max-h-80 min-w-[220px] overflow-y-auto rounded-xl border border-gray-100 bg-white p-1 shadow-card animate-fade-in"
+        >
+          {providers.map((p) => {
+            const keyed = hasKey(p.key_env)
+            return (
+              <div key={p.id}>
+                <DropdownMenu.Label className="flex items-center justify-between px-3 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                  {p.label}
+                  {!keyed && <span className="rounded bg-amber-100 px-1.5 text-[10px] normal-case text-amber-700">no key</span>}
+                </DropdownMenu.Label>
+                {[p.default_model, ...p.models.filter((m) => m !== p.default_model)].map((m) => {
+                  const isDefault = m === p.default_model
+                  const selected = current.id === p.id && model === m
+                  return (
+                    <DropdownMenu.Item
+                      key={m}
+                      onSelect={() => (keyed ? choose(p.id, m, isDefault) : onOpenSettings())}
+                      className={cn(
+                        'cursor-pointer rounded-lg px-3 py-1.5 text-xs outline-none transition-colors',
+                        selected ? 'bg-brand-tint font-medium text-brand' : 'text-gray-700 hover:bg-gray-50 focus:bg-gray-50',
+                        !keyed && 'text-gray-400',
+                      )}
+                    >
+                      {m}
+                      {isDefault ? ' (default)' : ''}
+                    </DropdownMenu.Item>
+                  )
+                })}
+              </div>
+            )
+          })}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  )
+}
+
+// ─── The page that is open, with one-tap tasks about it ───────────────────────
+
+function PageChip({ page, onPick }: { page: { url: string; title: string }; onPick: (prompt: string) => void }) {
+  let host = page.url
+  let short = page.url
+  try {
+    const u = new URL(page.url)
+    host = u.host
+    short = (u.host + u.pathname).slice(0, 120)   // no query string or fragment: they can carry anything
+  } catch { /* keep the raw text */ }
+  const where = `the page open in the browser right now (${short})`
+  const actions = [
+    { icon: Sparkles, label: 'Summarize this page', prompt: `Summarize ${where} in 5 short bullet points.` },
+    { icon: Table2, label: 'Extract the key data', prompt: `From ${where}, extract the key data (names, prices, dates, contact details) as a table.` },
+    { icon: List, label: 'List the main links', prompt: `List the most important links on ${where}, each with a one-line description.` },
+  ]
+  return (
+    <div className="mx-4 mb-2 flex-shrink-0">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-gray-500" title={page.url}>
+        <Globe size={12} className="flex-shrink-0 text-gray-400" />
+        <span className="truncate">
+          {page.title && page.title !== page.url && page.title !== host ? `${page.title} — ${host}` : host}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {actions.map((a) => (
+          <button
+            key={a.label}
+            onClick={() => onPick(a.prompt)}
+            className="flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11.5px] text-gray-600 transition-colors hover:border-brand/30 hover:bg-brand-tint/50 hover:text-brand"
+          >
+            <a.icon size={11} />
+            {a.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ─── Input card ────────────────────────────────────────────────────────────────
 
 function InputCard({
@@ -848,6 +1146,8 @@ function InputCard({
   hasMessages,
   prefill,
   onPrefillConsumed,
+  settingsVersion,
+  onOpenSettings,
 }: {
   status: Status
   onSend: (task: string, fmt: FormatOption) => void
@@ -855,6 +1155,8 @@ function InputCard({
   hasMessages: boolean
   prefill: string
   onPrefillConsumed: () => void
+  settingsVersion: number
+  onOpenSettings: () => void
 }) {
   const DRAFT_KEY = 'agent_draft_text'
   const [value, setValue] = useState(() => {
@@ -921,18 +1223,21 @@ function InputCard({
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           disabled={running}
-          placeholder="Describe a task for the agent…"
+          aria-label="Task for the agent"
+          placeholder={running ? 'Working… press Stop to give it a different task' : 'Describe a task for the agent…'}
           rows={1}
           className="w-full px-4 pt-3.5 pb-1 text-[14px] text-gray-800 placeholder:text-gray-400 resize-none border-none outline-none bg-transparent leading-relaxed disabled:opacity-60"
           style={{ minHeight: '52px', maxHeight: '150px' }}
         />
 
         <div className="flex items-center gap-2 px-3.5 pb-3 pt-1">
+          <ModelPicker disabled={running} refreshKey={settingsVersion} onOpenSettings={onOpenSettings} />
           <FormatDropdown value={fmt} onChange={setFmt} />
           <div className="flex-1" />
           {running ? (
             <button
               onClick={onStop}
+              aria-label="Stop the task"
               className="flex items-center gap-1.5 h-8 px-3 rounded-xl bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-600 text-xs font-medium transition-all"
             >
               <Square size={11} className="fill-current" />
@@ -942,6 +1247,7 @@ function InputCard({
             <button
               onClick={handleSend}
               disabled={!canSend}
+              aria-label="Send task"
               className={cn(
                 'w-8 h-8 rounded-xl flex items-center justify-center transition-all',
                 canSend
@@ -969,19 +1275,35 @@ function InputCard({
 export default function ChatPanel({
   messages,
   status,
+  connected,
   currentSessionId,
   sessions,
   settingsOpen,
   onSettingsOpen,
+  onOpenPlaybooks,
   onSendTask,
   onStop,
   onContinue,
+  onRetry,
   onNewSession,
   onSwitchSession,
   onDeleteSession,
+  onRenameSession,
+  approvalSlot,
+  onCollapse,
+  page,
+  wide,
+  onToggleWide,
 }: ChatPanelProps) {
   const [tab, setTab] = useState('chat')
   const [prefill, setPrefill] = useState('')
+  // Counts closings of the settings panel, so the model picker in the task box re-reads what was saved.
+  const [settingsVersion, setSettingsVersion] = useState(0)
+  const settingsSeen = useRef(false)
+  useEffect(() => {
+    if (!settingsSeen.current) { settingsSeen.current = settingsOpen; return }   // not on first render
+    if (!settingsOpen) { settingsSeen.current = false; setSettingsVersion((v) => v + 1) }
+  }, [settingsOpen])
   const clearPrefill = useCallback(() => setPrefill(''), [])
 
   // Auto-switch to chat tab when messages arrive
@@ -1042,7 +1364,9 @@ export default function ChatPanel({
                     <span
                       className={cn(
                         'w-1.5 h-1.5 rounded-full',
-                        status === 'running'
+                        !connected
+                          ? 'bg-amber-400 animate-pulse'
+                          : status === 'running'
                           ? 'bg-green-500 animate-pulse'
                           : status === 'error'
                           ? 'bg-red-400'
@@ -1051,7 +1375,9 @@ export default function ChatPanel({
                           : 'bg-gray-300',
                       )}
                     />
-                    <span className="text-[11px] text-gray-400 capitalize">{status}</span>
+                    <span className={cn('text-[11px] capitalize', connected ? 'text-gray-400' : 'text-amber-600')}>
+                      {connected ? status : 'Reconnecting…'}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1062,6 +1388,7 @@ export default function ChatPanel({
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
+                        aria-label="New chat"
                         onClick={onNewSession}
                         className="w-8 h-8 rounded-xl hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
                       >
@@ -1070,9 +1397,50 @@ export default function ChatPanel({
                     </TooltipTrigger>
                     <TooltipContent side="bottom">New chat</TooltipContent>
                   </Tooltip>
+                  {onToggleWide && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          aria-label={wide ? 'Narrower chat panel' : 'Wider chat panel'}
+                          onClick={onToggleWide}
+                          className="w-8 h-8 rounded-xl hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
+                        >
+                          {wide ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">{wide ? 'Narrower' : 'Wider'}</TooltipContent>
+                    </Tooltip>
+                  )}
+                  {onCollapse && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          aria-label="Hide chat panel"
+                          onClick={onCollapse}
+                          className="w-8 h-8 rounded-xl hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
+                        >
+                          <ChevronsRight size={16} />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">Hide chat panel</TooltipContent>
+                    </Tooltip>
+                  )}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
+                        aria-label="Playbooks"
+                        onClick={onOpenPlaybooks}
+                        className="w-8 h-8 rounded-xl hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
+                      >
+                        <BookMarked size={15} />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">Playbooks</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label="Settings"
                         onClick={() => onSettingsOpen(true)}
                         className="w-8 h-8 rounded-xl hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
                       >
@@ -1086,13 +1454,15 @@ export default function ChatPanel({
             </div>
 
             {/* Tabs */}
-            <div className="flex gap-1 border-b border-gray-100 -mx-4 px-4">
+            <div role="tablist" className="flex gap-1 border-b border-gray-100 -mx-4 px-4">
               {[
                 { value: 'chat',    label: 'Chat',    icon: MessageSquare },
                 { value: 'history', label: 'History', icon: History       },
               ].map((t) => (
                 <button
                   key={t.value}
+                  role="tab"
+                  aria-selected={tab === t.value}
                   onClick={() => setTab(t.value)}
                   className={cn(
                     'flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium border-b-2 -mb-px transition-all',
@@ -1125,19 +1495,35 @@ export default function ChatPanel({
               <div
                 ref={scrollRef}
                 onScroll={handleScroll}
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions"
                 className="flex-1 overflow-y-auto scrollbar-thin"
               >
                 {messages.length === 0 ? (
                   <WelcomeState onSelect={(p) => setPrefill(p)} />
                 ) : (
                   <div className="px-5 py-5 space-y-5">
-                    {messages.map((turn) => (
-                      <MessageBubble key={turn.id} turn={turn} />
+                    {messages.map((turn, i) => (
+                      <MessageBubble
+                        key={turn.id}
+                        turn={turn}
+                        onOpenSettings={() => onSettingsOpen(true)}
+                        onRetry={
+                          turn.error && i === messages.length - 1 && status !== 'running' ? onRetry : undefined
+                        }
+                      />
                     ))}
                     <div ref={bottomRef} />
                   </div>
                 )}
               </div>
+
+              {approvalSlot}
+
+              {page && /^https?:/.test(page.url) && status !== 'running' && status !== 'paused' && !approvalSlot && (
+                <PageChip page={page} onPick={(p) => setPrefill(p)} />
+              )}
 
               {/* Input card */}
               <InputCard
@@ -1147,6 +1533,8 @@ export default function ChatPanel({
                 hasMessages={messages.length > 0}
                 prefill={prefill}
                 onPrefillConsumed={clearPrefill}
+                settingsVersion={settingsVersion}
+                onOpenSettings={() => onSettingsOpen(true)}
               />
             </div>
           ) : (
@@ -1159,11 +1547,14 @@ export default function ChatPanel({
                   setTab('chat')
                 }}
                 onDelete={onDeleteSession}
+                onRename={onRenameSession}
               />
             </div>
           )}
         </>
       )}
+      {/* An approval must be seen on every tab, not only in the chat */}
+      {(settingsOpen || tab !== 'chat') && approvalSlot}
     </div>
   )
 }

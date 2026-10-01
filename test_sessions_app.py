@@ -66,6 +66,21 @@ class Endpoints(AppCase):
         r = c.post(f"/sessions/{ChatStore.new_id()}/switch")
         self.assertEqual((r.status_code, r.json()["ok"]), (200, False))
 
+    def test_rename_a_chat_over_http(self):
+        sid = ChatStore.new_id()
+        self.store.save(sid, [{"role": "user", "content": "hi", "ts": "1"}] * 2)
+        c = self.client()
+        self.assertEqual(c.post(f"/sessions/{sid}/rename", json={"title": "  Lagos   jobs " + chr(10)}).json(),
+                         {"ok": True, "title": "Lagos jobs"})
+        self.assertEqual(next(e for e in self.store.index() if e["id"] == sid)["title"], "Lagos jobs")
+        self.assertFalse(c.post(f"/sessions/{sid}/rename", json={"title": "   "}).json()["ok"])
+        self.assertFalse(c.post(f"/sessions/{ChatStore.new_id()}/rename", json={"title": "x"}).json()["ok"])
+        self.assertEqual(c.post("/sessions/..%5Cx/rename", json={"title": "x"}).status_code, 400)
+        long = c.post(f"/sessions/{sid}/rename", json={"title": "y" * 500}).json()["title"]
+        self.assertEqual(len(long), 60)
+        self.store.save(sid, [{"role": "user", "content": "hi", "ts": "1"}] * 4)      # later saves keep the name
+        self.assertEqual(next(e for e in self.store.index() if e["id"] == sid)["title"], long)
+
     def test_delete_a_saved_chat_over_http(self):
         sid = ChatStore.new_id()
         self.store.save(sid, [{"role": "user", "content": "hi", "ts": "1"}] * 2)

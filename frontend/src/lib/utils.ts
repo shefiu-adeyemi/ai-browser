@@ -31,6 +31,10 @@ export function formatDate(dateStr: string): string {
   }
 }
 
+export function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
+}
+
 export function generateId(): string {
   return Math.random().toString(36).slice(2, 11)
 }

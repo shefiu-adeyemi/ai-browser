@@ -1,5 +1,6 @@
-import { useEffect, useRef, useCallback } from 'react'
-import { Status, InputMessage } from '@/types'
+import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react'
+import BrowserChrome, { type BrowserActions } from '@/components/BrowserChrome'
+import { Status, InputMessage, type BrowserState } from '@/types'
 import { cn } from '@/lib/utils'
 
 interface BrowserPaneProps {
@@ -13,6 +14,10 @@ interface BrowserPaneProps {
   currentAction?: string
   currentUrl?: string
   wsRef: React.RefObject<WebSocket | null>
+  banner?: ReactNode            // a hand-off request, shown across the top of the page
+  browser: BrowserState | null
+  locked: boolean               // the agent is working: the toolbar is look-only
+  actions: BrowserActions
 }
 
 const STATUS_CONFIG: Record<Status, { label: string; dot: string; color: string }> = {
@@ -90,12 +95,76 @@ export default function BrowserPane({
   currentAction,
   currentUrl,
   wsRef,
+  banner,
+  browser,
+  locked,
+  actions,
 }: BrowserPaneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // "You're in control": shown while the user is clicking or typing in the page, so it is clear who
+  // is driving. It fades a few seconds after the last input.
+  const [controlling, setControlling] = useState(false)
+  const controlTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const markControl = useCallback(() => {
+    setControlling(true)
+    if (controlTimer.current) clearTimeout(controlTimer.current)
+    controlTimer.current = setTimeout(() => setControlling(false), 4000)
+  }, [])
+  useEffect(() => () => { if (controlTimer.current) clearTimeout(controlTimer.current) }, [])
+
+  const [fullscreen, setFullscreen] = useState(false)
+  useEffect(() => {
+    const on = () => setFullscreen(document.fullscreenElement === rootRef.current)
+    document.addEventListener('fullscreenchange', on)
+    return () => document.removeEventListener('fullscreenchange', on)
+  }, [])
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) document.exitFullscreen?.()
+    else rootRef.current?.requestFullscreen?.().catch(() => {})
+  }
   // Browser viewport size in CSS px. Frames may be downscaled, so clicks must be
   // mapped to this, not to the image's own size.
   const nativeSizeRef = useRef({ w: 1280, h: 800 })
   const frameSeqRef = useRef(0)   // latest frame wins if decodes finish out of order
+
+  // How the page is laid out in the pane. "Fill" zooms in a little (10% to 25%) so the grey bands shrink or
+  // vanish, which crops the edges; "Fit" shows the whole page with bands where the shapes differ.
+  const ZOOM = 1.1        // at least this much bigger than Fit
+  const MAX_ZOOM = 1.25   // and at most this much
+  const areaRef = useRef<HTMLDivElement>(null)
+  const [area, setArea] = useState({ w: 0, h: 0 })
+  const [frameSize, setFrameSize] = useState({ w: 1280, h: 800 })
+  const [fill, setFill] = useState(() => {
+    try { return localStorage.getItem('aiba_view_fill') !== '0' } catch { return true }
+  })
+  const toggleFill = () => {
+    setFill((f) => {
+      try { localStorage.setItem('aiba_view_fill', f ? '0' : '1') } catch { /* not remembered */ }
+      return !f
+    })
+  }
+  useEffect(() => {
+    const el = areaRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setArea({ w: el.clientWidth, h: el.clientHeight }))
+    ro.observe(el)
+    setArea({ w: el.clientWidth, h: el.clientHeight })
+    return () => ro.disconnect()
+  }, [])
+  const shown = (() => {
+    const fw = viewport?.w ?? frameSize.w
+    const fh = viewport?.h ?? frameSize.h
+    if (!area.w || !area.h || !fw || !fh) return null
+    const contain = Math.min(area.w / fw, area.h / fh)
+    const cover = Math.max(area.w / fw, area.h / fh)
+    // Fill: zoom in until the page covers the pane, but by at least 10% and never by more than 25% over
+    // "Fit" (on a tall, narrow pane covering it would hide half the page). Whatever is left over is
+    // cropped equally on both sides.
+    const k = fill ? Math.max(contain * ZOOM, Math.min(cover, contain * MAX_ZOOM)) : contain
+    return { w: Math.round(fw * k), h: Math.round(fh * k) }
+  })()
   useEffect(() => {
     if (viewport) nativeSizeRef.current = viewport
   }, [viewport])
@@ -111,6 +180,7 @@ export default function BrowserPane({
       if (seq !== frameSeqRef.current) return
       canvas.width = img.width
       canvas.height = img.height
+      setFrameSize((s) => (s.w === img.width && s.h === img.height ? s : { w: img.width, h: img.height }))
       if (!viewport) nativeSizeRef.current = { w: img.width, h: img.height }
       ctx.drawImage(img, 0, 0)
     }
@@ -145,9 +215,10 @@ export default function BrowserPane({
 
   const onMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current) return
+    markControl()
     const { x, y } = toNative(canvasRef.current, e.clientX, e.clientY)
     send({ type: 'input', kind: 'mouse', event: 'mousePressed', x, y, button: e.button === 2 ? 'right' : 'left', clickCount: 1, deltaX: 0, deltaY: 0, modifiers: getModifiers(e) })
-  }, [send, toNative])
+  }, [send, toNative, markControl])
 
   const onMouseUp = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current) return
@@ -161,11 +232,39 @@ export default function BrowserPane({
     send({ type: 'input', kind: 'mouse', event: 'mouseMoved', x, y, button: 'none', clickCount: 0, deltaX: 0, deltaY: 0, modifiers: getModifiers(e) })
   }, [send, toNative])
 
+  // The page is drawn smaller than it really is, so a wheel movement of N screen pixels has to be N times
+  // the shrink factor in the page's own pixels, or scrolling feels slow. A remote browser also jumps the
+  // whole distance at once, so the movement is eased out over a few frames (each frame sends a share of
+  // what is left), which looks like smooth scrolling and adds up to exactly the distance asked for.
+  const wheelRef = useRef<{ x: number; y: number; dx: number; dy: number; mods: number; raf: number } | null>(null)
   const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current) return
+    const rect = canvasRef.current.getBoundingClientRect()
+    const k = rect.width > 0 ? nativeSizeRef.current.w / rect.width : 1
     const { x, y } = toNative(canvasRef.current, e.clientX, e.clientY)
-    send({ type: 'input', kind: 'mouse', event: 'mouseWheel', x, y, button: 'none', clickCount: 0, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: getModifiers(e) })
+    const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? rect.height : 1   // lines / pages -> pixels
+    const w = wheelRef.current ?? { x, y, dx: 0, dy: 0, mods: getModifiers(e), raf: 0 }
+    w.x = x
+    w.y = y
+    w.dx += e.deltaX * unit * k
+    w.dy += e.deltaY * unit * k
+    if (wheelRef.current) return        // the loop below is already running and will pick this up
+    wheelRef.current = w
+    const step = () => {
+      const share = (v: number) => (Math.abs(v) < 4 ? v : v * 0.3)   // the last few pixels go in one go
+      const sx = Math.round(share(w.dx))
+      const sy = Math.round(share(w.dy))
+      w.dx -= sx
+      w.dy -= sy
+      if (sx !== 0 || sy !== 0) {
+        send({ type: 'input', kind: 'mouse', event: 'mouseWheel', x: w.x, y: w.y, button: 'none', clickCount: 0, deltaX: sx, deltaY: sy, modifiers: w.mods })
+      }
+      if (Math.abs(w.dx) < 0.5 && Math.abs(w.dy) < 0.5) wheelRef.current = null
+      else w.raf = requestAnimationFrame(step)
+    }
+    w.raf = requestAnimationFrame(step)
   }, [send, toNative])
+  useEffect(() => () => { if (wheelRef.current) cancelAnimationFrame(wheelRef.current.raf) }, [])
 
   // Text that does not come from a plain key press (an emoji picker, an IME such as Chinese/Japanese,
   // dictation, a phone keyboard) raises no usable key events on a canvas. A hidden text box takes the
@@ -185,6 +284,7 @@ export default function BrowserPane({
   }, [sendText])
 
   const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    markControl()
     // An IME is composing: let the text box have it, it is sent when the composition ends.
     if (e.nativeEvent.isComposing || e.key === 'Process' || e.key === 'Unidentified') return
     // Ctrl/Cmd+V: let the browser fire its paste event (handled below) instead of swallowing the key.
@@ -194,7 +294,7 @@ export default function BrowserPane({
     if ([...e.key].length === 1) {   // one character, including emoji (which are 2 UTF-16 units)
       send({ type: 'input', kind: 'key', event: 'char', key: e.key, code: e.code, text: e.key, keyCode: e.keyCode, modifiers: getModifiers(e) })
     }
-  }, [send])
+  }, [send, markControl])
 
   const onPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     e.preventDefault()
@@ -212,50 +312,35 @@ export default function BrowserPane({
 
   return (
     <div
+      ref={rootRef}
       className="flex flex-col w-full h-full overflow-hidden"
       style={{ background: 'radial-gradient(ellipse at 50% 40%, #ECEEF0 0%, #E2E4E6 100%)' }}
     >
-      {/* ── Browser toolbar — single row like a real browser ── */}
-      <div
-        className="flex-shrink-0 flex items-center gap-3 px-4"
-        style={{
-          height: 42,
-          background: 'rgba(255,255,255,0.88)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(0,0,0,0.07)',
-        }}
-      >
-        {/* Traffic lights */}
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          <span className="w-2.5 h-2.5 rounded-full bg-[#FF5F57]" />
-          <span className="w-2.5 h-2.5 rounded-full bg-[#FFBD2E]" />
-          <span className="w-2.5 h-2.5 rounded-full bg-[#28C840]" />
-        </div>
+      <BrowserChrome
+        state={browser}
+        currentUrl={currentUrl ?? ''}
+        locked={locked}
+        controlling={controlling}
+        fullscreen={fullscreen}
+        onFullscreen={toggleFullscreen}
+        fill={fill}
+        onToggleFill={toggleFill}
+        actions={actions}
+      />
 
-        {/* Address bar — takes remaining space, URL truncates inside */}
-        <div
-          className="flex items-center gap-2 px-3 h-7 rounded-lg min-w-0 flex-1 overflow-hidden"
-          style={{ background: 'rgba(0,0,0,0.05)' }}
-        >
-          <svg width="9" height="10" viewBox="0 0 9 10" fill="none" className="flex-shrink-0 text-gray-400">
-            <rect x="1" y="4" width="7" height="6" rx="1" stroke="currentColor" strokeWidth="1.2"/>
-            <path d="M2.5 4V3a2 2 0 0 1 4 0v1" stroke="currentColor" strokeWidth="1.2"/>
-          </svg>
-          <span className="text-[11px] text-gray-600 truncate min-w-0">
-            {currentUrl || 'Waiting for the browser…'}
-          </span>
-        </div>
-      </div>
+      {banner}
 
       {/* ── Viewport ── */}
-      <div className="flex-1 min-h-0 flex items-center justify-center overflow-hidden relative">
+      <div ref={areaRef} className="flex-1 min-h-0 flex items-center justify-center overflow-hidden relative">
         <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="max-w-full max-h-full object-contain outline-none"
+            className="flex-shrink-0 outline-none"
             style={{
               display: hasScreenshot ? 'block' : 'none',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+              width: shown ? shown.w : undefined,
+              height: shown ? shown.h : undefined,
+              boxShadow: fill ? undefined : '0 8px 32px rgba(0,0,0,0.18)',
               cursor: 'default',
             }}
             onMouseDown={onMouseDown}
@@ -286,7 +371,7 @@ export default function BrowserPane({
           <div className="absolute inset-0 pointer-events-none">
             <div
               className="absolute inset-0"
-              style={{ boxShadow: 'inset 0 0 0 2px rgba(47,107,79,0.35)' }}
+              style={{ boxShadow: `inset 0 0 0 2px ${controlling ? 'rgba(37,99,235,0.45)' : 'rgba(47,107,79,0.35)'}` }}
             />
           </div>
         )}
@@ -305,7 +390,7 @@ export default function BrowserPane({
           <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', cfg.dot)} />
           <span className={cn('text-[11px] font-medium', cfg.color)}>{cfg.label}</span>
           {status === 'running' && currentAction && (
-            <span className="text-[11px] text-gray-400 truncate">— {currentAction}</span>
+            <span title={currentAction} className="text-[11px] text-gray-400 truncate">— {currentAction}</span>
           )}
         </div>
       )}

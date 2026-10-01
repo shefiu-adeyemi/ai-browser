@@ -1,0 +1,768 @@
+"""Tests for playbook_player.py with a fake page (no browser)."""
+
+import asyncio
+import unittest
+from types import SimpleNamespace as NS
+
+import playbook as pbk
+from playbook import Check, Fingerprint, Playbook, Step, Variable
+from playbook_match import Candidate
+from playbook_player import PlaybookPlayer, StepApprover, summarize
+
+
+class Clock:
+    """Time only moves when something sleeps, so timeouts are tested instantly."""
+    def __init__(self): self.now = 0.0
+    def __call__(self): return self.now
+    async def sleep(self, s): self.now += s
+
+
+class Inner:
+    """The user answering the guard's questions (attended)."""
+    def __init__(self, answer=True, clock=None, thinks=0.0):
+        self.answer, self.asked, self.clock, self.thinks = answer, [], clock, thinks
+        self.details: list[str] = []
+        self.then = None                                    # what the user does in the browser before answering
+    async def ask(self, kind, title, detail="", url=""):
+        self.asked.append((kind, title))
+        self.details.append(detail)
+        if self.clock is not None:
+            await self.clock.sleep(self.thinks)             # how long the user took to answer
+        if self.then is not None:
+            self.then()
+        return self.answer
+
+
+class FakePage:
+    def __init__(self, approver, elements=None, url="about:blank"):
+        self.approver, self.elements, self.url_ = approver, list(elements or []), url
+        self.actions, self.has_llm = [], True
+        self.risky: dict[int, str] = {}           # element index -> what the guard would ask
+        self.risky_keys: str | None = None        # what the guard would ask before pressing Enter
+        self.blocked: set[int] = set()            # element index the guard would block
+        self.after: dict[tuple, str] = {}         # (action, index) -> the url the page moves to
+        self.redirect: dict[str, str] = {}
+        self.missing_once: set[int] = set()       # index reports "not available" the first time
+        self.raise_on: str | None = None
+        self.extract_text = "Jane Doe, Engineer"
+        self.tab_ids = ["AAAA", "BBBB", "CCCC"]
+        self.settled = 0
+        self.settle_error: BaseException | None = None
+
+    async def candidates(self): return list(self.elements)
+    async def url(self): return self.url_
+    async def tabs(self): return list(self.tab_ids)
+
+    async def settle(self):
+        self.settled += 1
+        if self.settle_error is not None:
+            raise self.settle_error
+
+    async def act(self, name, params):
+        if self.raise_on == name:
+            raise RuntimeError("driver exploded")
+        self.actions.append((name, dict(params)))
+        idx = params.get("index")
+        if name == "navigate":
+            self.url_ = self.redirect.get(params["url"], params["url"])
+        if idx in self.missing_once:
+            self.missing_once.discard(idx)
+            return NS(error=None, extracted_content=f"Element index {idx} not available - page may have changed.")
+        if idx in self.blocked:
+            return NS(error="Blocked by safety policy: Refused to type a credential. Do not retry this. "
+                            "Continue without it or report it.", extracted_content=None)
+        enter = name == "send_keys" and "Enter" in params.get("keys", "") and self.risky_keys
+        if (idx is not None and idx in self.risky) or enter:
+            title = self.risky_keys if enter else self.risky[idx]
+            if not await self.approver.ask("approve", title, "", self.url_):
+                return NS(error="The user declined this action (or did not answer in time).", extracted_content=None)
+        if (name, idx) in self.after:
+            self.url_ = self.after[(name, idx)]
+        return NS(error=None, extracted_content=self.extract_text if name == "extract" else "ok")
+
+
+def el(i, ax="Go", node="button", attrs=None, h=None, sh=None, xp=None):
+    return Candidate(index=i, node_name=node, attributes=attrs or {}, ax_name=ax, x_path=xp,
+                     element_hash=h, stable_hash=sh)
+
+
+def fp(ax="Go", node="button", attrs=None, h=None, sh=None, xp=None):
+    return Fingerprint(node_name=node, attributes=attrs or {}, ax_name=ax, x_path=xp, element_hash=h, stable_hash=sh)
+
+
+def make_pb(steps, variables=None, approve=False, name="Test run"):
+    pb = pbk.refresh(Playbook(name=name, steps=steps, variables=variables or []))
+    return pbk.with_approval(pb) if approve else pb
+
+
+def S(n, kind, **kw):
+    kw.setdefault("tag", "ai" if kind in pbk.AI_KINDS else "deterministic")
+    return Step(id=f"s{n}", kind=kind, **kw)
+
+
+class PlayerCase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.inner = Inner(True)
+        self.msgs: list[str] = []
+
+    def build(self, elements=None, attended=True, url="about:blank", **kw):
+        self.approver = StepApprover(self.inner, attended, clock=self.clock)
+        self.page = FakePage(self.approver, elements, url)
+        async def notify(t): self.msgs.append(t)
+        self.player = PlaybookPlayer(self.page, self.approver, notify=notify, settle=0, clock=self.clock,
+                                     sleep=self.clock.sleep, **kw)
+        return self.page
+
+    async def run_pb(self, pb, values=None):
+        return await self.player.run(pb, values)
+
+
+class Basics(PlayerCase):
+    async def test_a_simple_run_resolves_elements_and_fills_inputs(self):
+        page = self.build([el(24, "Search", "input", {"id": "q"}, h=1, sh=2), el(25, "Go", h=3, sh=4)])
+        pb = make_pb([
+            S(1, "open", url="{{site}}"),
+            S(2, "type", target=fp("Search", "input", {"id": "q"}, 1, 2), text="{{term}}"),
+            S(3, "click", target=fp("Go", h=3, sh=4)),
+            S(4, "scroll", down=True, pages=2),
+            S(5, "key", keys="Tab"),
+            S(6, "back"),
+        ], variables=[Variable(name="site", type="url", allowed_hosts=["shop.example.com"]), Variable(name="term")])
+        r = await self.run_pb(pb, {"site": "https://shop.example.com/", "term": "red shoes"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions, [
+            ("navigate", {"url": "https://shop.example.com/", "new_tab": False}),
+            ("input", {"index": 24, "text": "red shoes", "clear": True}),
+            ("click", {"index": 25}),
+            ("scroll", {"down": True, "pages": 2.0}),
+            ("send_keys", {"keys": "Tab"}),
+            ("go_back", {})])
+        self.assertEqual([s.status for s in r.steps], ["ok"] * 6)
+        self.assertEqual(r.steps[1].matched, "exact (high)")
+        self.assertEqual(self.msgs[0], "▶ Step 1/6: Open a page")
+
+    async def test_secrets_are_passed_through_untouched(self):
+        page = self.build([el(1, "Password", "input", {"type": "password"}, h=1)])
+        pb = make_pb([S(1, "open", url="https://a.com/login"),
+                      S(2, "type", target=fp("Password", "input", {"type": "password"}, 1),
+                        text="<secret>pw</secret>")])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions[1][1]["text"], "<secret>pw</secret>")
+
+    async def test_select_and_targeted_scroll(self):
+        page = self.build([el(7, "Size", "select", {"id": "size"}, h=1)])
+        pb = make_pb([S(1, "open", url="https://a.com/"),
+                      S(2, "select", target=fp("Size", "select", {"id": "size"}, 1), text="Large"),
+                      S(3, "scroll", target=fp("Size", "select", {"id": "size"}, 1), down=False, pages=1)])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions[1], ("select_dropdown", {"index": 7, "text": "Large"}))
+        self.assertEqual(page.actions[2], ("scroll", {"down": False, "pages": 1.0, "index": 7}))
+
+    async def test_wait_uses_the_clock_and_is_capped(self):
+        self.build()
+        pb = make_pb([S(1, "wait", seconds=5), S(2, "wait", seconds=300)])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "done")
+        self.assertEqual(self.clock.now, 305)
+
+    async def test_the_result_reports_timing_and_dict_form(self):
+        self.build()
+        r = await self.run_pb(make_pb([S(1, "wait", seconds=2)]))
+        d = r.to_dict()
+        self.assertEqual((d["status"], d["seconds"], len(d["steps"])), ("done", 2.0, 1))
+        self.assertEqual(d["steps"][0]["kind"], "wait")
+
+
+class Refusals(PlayerCase):
+    async def test_an_invalid_playbook_does_nothing(self):
+        page = self.build()
+        r = await self.run_pb(Playbook(name="", steps=[]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("can't run", r.error)
+        self.assertEqual(page.actions, [])
+
+    async def test_bad_inputs_do_nothing(self):
+        page = self.build()
+        pb = make_pb([S(1, "open", url="{{p}}")], variables=[Variable(name="p", type="linkedin_url")])
+        for values in ({}, {"p": "https://evil.com/in/x"}, {"p": "https://www.linkedin.com/in/a", "zzz": "1"}):
+            r = await self.run_pb(pb, values)
+            self.assertEqual(r.status, "failed", values)
+            self.assertIn("Check the inputs", r.error)
+        self.assertEqual(page.actions, [])
+
+    async def test_an_unapproved_site_is_refused_even_if_the_steps_ask_for_it(self):
+        # A variable may only point at the sites it was approved for, whatever the stored list says.
+        page = self.build()
+        pb = make_pb([S(1, "open", url="{{u}}")], variables=[Variable(name="u", type="url", allowed_hosts=["a.com"])])
+        pb = pb.model_copy(update={"domains": ["a.com", "evil.org"]})            # hand-edited file
+        r = await self.run_pb(pb, {"u": "https://evil.org/"})
+        self.assertEqual(r.status, "failed")
+        self.assertEqual(page.actions, [])
+
+    async def test_a_hand_edited_site_list_does_not_widen_what_a_run_may_visit(self):
+        page = self.build([el(1, "Out", "a", h=1)])
+        page.after[("click", 1)] = "https://evil.org/phish"
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Out", "a", h=1))])
+        pb = pb.model_copy(update={"domains": ["a.com", "evil.org"]})            # the file says evil.org is fine
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "failed")
+        self.assertIn("evil.org", r.error)
+        self.assertTrue(r.steps[1].fatal)
+
+    async def test_a_literal_open_outside_the_recomputed_sites_cannot_happen(self):
+        page = self.build()
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/")]))
+        self.assertEqual(r.status, "done")
+
+    async def test_without_an_open_step_the_starting_site_is_the_only_one(self):
+        page = self.build([el(1, "Go", h=1)], url="https://a.com/start")
+        pb = make_pb([S(1, "click", target=fp("Go", h=1))])
+        page.after[("click", 1)] = "https://b.com/"
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "failed")
+        self.assertIn("b.com", r.error)
+
+    async def test_leaving_the_approved_sites_stops_the_run(self):
+        page = self.build([el(1, "Out", "a", {"href": "https://evil.org"}, h=1), el(2, "Next", h=2)])
+        page.after[("click", 1)] = "https://evil.org/phish"
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Out", "a", h=1)),
+                      S(3, "click", target=fp("Next", h=2))])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "failed")
+        self.assertIn("evil.org", r.error)
+        self.assertTrue(r.steps[1].fatal)
+        self.assertEqual(len(page.actions), 2)                    # the third step never ran
+
+    async def test_a_recorded_landing_site_is_allowed(self):
+        page = self.build([el(1, "Docs", h=1)])
+        page.after[("click", 1)] = "https://docs.other.org/start"
+        pb = make_pb([S(1, "open", url="https://a.com/"),
+                      S(2, "click", target=fp("Docs", h=1), check=Check(hosts=["docs.other.org"]))])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "done", r.error)
+
+    async def test_a_non_web_address_cannot_get_through_a_variable(self):
+        page = self.build()
+        pb = make_pb([S(1, "open", url="{{u}}")], variables=[Variable(name="u", type="url", allowed_hosts=["a.com"])])
+        r = await self.run_pb(pb, {"u": "javascript:alert(1)"})
+        self.assertEqual(r.status, "failed")
+        self.assertEqual(page.actions, [])
+
+    async def test_the_guard_blocking_is_final_and_explained(self):
+        page = self.build([el(1, "Name", "input", {"type": "text"}, h=1)])
+        page.blocked.add(1)
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "type", target=fp("Name", "input", h=1), text="x"),
+                      S(3, "wait", seconds=1)])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "failed")
+        self.assertTrue(r.steps[1].fatal)
+        self.assertIn("Blocked by safety policy", r.steps[1].detail)
+        self.assertNotIn("Do not retry", r.steps[1].detail)
+        self.assertEqual(len(r.steps), 2)
+
+
+class Finding(PlayerCase):
+    async def test_a_missing_element_stops_after_the_timeout(self):
+        page = self.build([el(1, "Other", h=9)])
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Go", h=1))])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "failed")
+        self.assertIn("Couldn't find Go", r.error)
+        self.assertGreaterEqual(self.clock.now, 10)
+        self.assertEqual([a[0] for a in page.actions], ["navigate"])
+
+    async def test_an_element_that_appears_late_is_waited_for(self):
+        page = self.build([])
+        polls = {"n": 0}
+        orig = page.candidates
+        async def late():
+            polls["n"] += 1
+            if polls["n"] == 4:
+                page.elements = [el(3, "Go", h=1)]
+            return await orig()
+        page.candidates = late
+        r = await self.run_pb(make_pb([S(1, "click", target=fp("Go", h=1))]))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions, [("click", {"index": 3})])
+
+    async def test_ambiguity_is_not_guessed(self):
+        page = self.build([el(1, "Next"), el(2, "Next")])
+        r = await self.run_pb(make_pb([S(1, "click", target=Fingerprint(node_name="button", ax_name="Next"))]))
+        self.assertEqual(r.status, "failed")
+        self.assertEqual(page.actions, [])
+
+    async def test_a_stale_index_is_re_read_once(self):
+        page = self.build([el(5, "Go", h=1)])
+        page.missing_once.add(5)
+        r = await self.run_pb(make_pb([S(1, "click", target=fp("Go", h=1))]))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(len(page.actions), 2)
+
+    async def test_a_stale_index_twice_fails(self):
+        page = self.build([el(5, "Go", h=1)])
+        async def always_missing(name, params):
+            page.actions.append((name, params))
+            return NS(error=None, extracted_content="Element index 5 not available - page may have changed.")
+        page.act = always_missing
+        r = await self.run_pb(make_pb([S(1, "click", target=fp("Go", h=1))]))
+        self.assertEqual(r.status, "failed")
+        self.assertEqual(len(page.actions), 2)
+
+
+class Approvals(PlayerCase):
+    def risky_pb(self, approve, **fpk):
+        return make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Send", **fpk), ask=True),
+                        S(3, "wait", seconds=1)], approve=approve)
+
+    async def test_a_pre_approved_step_with_a_high_confidence_match_runs_without_asking(self):
+        page = self.build([el(4, "Send", h=7, sh=8)])
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.risky_pb(True, h=7, sh=8))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [])
+        self.assertEqual(r.steps[1].approval, "preapproved")
+
+    async def test_a_medium_confidence_match_is_asked_even_if_approved(self):
+        page = self.build([el(4, "Send")])                  # only the name matches (medium)
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.risky_pb(True, h=7, sh=8))
+        self.assertEqual(self.inner.asked, [("approve", "Click Send?")])
+        self.assertEqual(r.status, "done")
+        self.assertEqual(r.steps[1].approval, "asked")
+
+    async def test_a_different_risky_element_is_not_covered_by_the_approval(self):
+        page = self.build([el(4, "Delete account", h=99, sh=99), el(5, "Send", h=7, sh=8)])
+        page.risky[4] = "Click Delete?"
+        pb = make_pb([S(1, "open", url="https://a.com/"),
+                      S(2, "click", target=fp("Delete account", h=99, sh=99))], approve=True)   # NOT flagged ask
+        r = await self.run_pb(pb)
+        self.assertEqual(self.inner.asked, [("approve", "Click Delete?")])      # asked: not pre-approved
+
+    async def test_an_unapproved_playbook_asks_the_user(self):
+        page = self.build([el(4, "Send", h=7, sh=8)])
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.risky_pb(False, h=7, sh=8))
+        self.assertEqual(self.inner.asked, [("approve", "Click Send?")])
+        self.assertEqual(r.status, "done")
+
+    async def test_the_user_saying_no_stops_the_run(self):
+        self.inner.answer = False
+        page = self.build([el(4, "Send", h=7, sh=8)])
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.risky_pb(False, h=7, sh=8))
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("didn't approve", r.error)
+        self.assertEqual(len(r.steps), 2)
+
+    async def test_unattended_never_asks_and_stops(self):
+        page = self.build([el(4, "Send")], attended=False)           # not even a high match
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.risky_pb(True, h=7, sh=8))
+        self.assertEqual(r.status, "needs_you")
+        self.assertEqual(self.inner.asked, [])
+        self.assertIn("Needs your approval", r.error)
+
+    async def test_unattended_runs_an_approved_high_confidence_step(self):
+        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.risky_pb(True, h=7, sh=8))
+        self.assertEqual(r.status, "done", r.error)
+
+    async def test_unattended_and_unapproved_stops_even_for_the_exact_element(self):
+        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        page.risky[4] = "Click Send?"
+        r = await self.run_pb(self.risky_pb(False, h=7, sh=8))
+        self.assertEqual(r.status, "needs_you")
+
+    async def test_enter_in_a_message_box_follows_the_same_rules(self):
+        page = self.build([el(1, "Message", "div", {"role": "textbox"}, h=1, sh=2)], attended=False)
+        page.risky_keys = "Press Enter?"
+        steps = lambda: [S(1, "open", url="https://a.com/"),
+                         S(2, "type", target=fp("Message", "div", {"role": "textbox"}, 1, 2), text="hi"),
+                         S(3, "key", keys="Enter", ask=True)]
+        r = await self.run_pb(make_pb(steps(), approve=True))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(r.steps[2].approval, "preapproved")
+        page = self.build([el(1, "Message", "div", {"role": "textbox"}, h=1, sh=2)], attended=False)
+        page.risky_keys = "Press Enter?"
+        r2 = await self.run_pb(make_pb(steps(), approve=False))
+        self.assertEqual(r2.status, "needs_you")
+
+    async def test_enter_is_not_pre_approved_unless_the_step_before_it_was_matched_with_certainty(self):
+        # the field is found only by its name (medium), so where Enter lands is not certain: ask instead
+        page = self.build([el(1, "Message", "div")], attended=True)
+        page.risky_keys = "Press Enter?"
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "type", target=fp("Message", "div", h=7, sh=8), text="hi"),
+                      S(3, "key", keys="Enter", ask=True)], approve=True)
+        r = await self.run_pb(pb)
+        self.assertEqual(self.inner.asked, [("approve", "Press Enter?")])
+        self.assertEqual(r.steps[2].approval, "asked")
+
+    async def test_enter_straight_after_a_non_element_step_is_not_pre_approved(self):
+        page = self.build([], attended=False)
+        page.risky_keys = "Press Enter?"
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/"), S(2, "key", keys="Enter", ask=True)], approve=True))
+        self.assertEqual(r.status, "needs_you")
+
+    async def test_approval_does_not_leak_into_the_next_step(self):
+        page = self.build([el(4, "Send", h=7, sh=8), el(5, "Delete", h=1, sh=1)])
+        page.risky[4], page.risky[5] = "Click Send?", "Click Delete?"
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Send", h=7, sh=8), ask=True),
+                      S(3, "click", target=fp("Delete", h=1, sh=1))], approve=True)
+        r = await self.run_pb(pb)
+        self.assertEqual(self.inner.asked, [("approve", "Click Delete?")])      # step 3 was NOT pre-approved
+        self.assertEqual([s.approval for s in r.steps], [None, "preapproved", "asked"])
+
+
+class Timing(PlayerCase):
+    async def test_time_spent_waiting_for_the_user_is_not_counted(self):
+        page = self.build([el(4, "Send")], max_seconds=10)
+        page.risky[4] = "Click Send?"
+        self.inner.clock, self.inner.thinks = self.clock, 500       # the user took ~8 minutes to answer
+        pb = make_pb([S(1, "wait", seconds=6), S(2, "click", target=Fingerprint(node_name="button", ax_name="Send"), ask=True),
+                      S(3, "wait", seconds=3)])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "done", r.error)
+
+    async def test_the_open_guard_refuses_a_site_outside_the_approved_list_before_navigating(self):
+        # defence in depth: reachable only if the allowed list and the steps ever disagree
+        page = self.build()
+        self.player._allowed, self.player._values, self.player._variables = ["a.com"], {}, {}
+        res = await self.player._open(S(1, "open", url="https://b.com/"))
+        self.assertEqual((res.status, res.fatal), ("failed", True))
+        self.assertEqual(page.actions, [])
+        res = await self.player._open(S(1, "open", url="ftp://a.com/"))
+        self.assertEqual((res.status, res.fatal), ("failed", True))
+
+    async def test_without_user_waiting_the_limit_still_applies(self):
+        self.build(max_seconds=10)
+        r = await self.run_pb(make_pb([S(1, "wait", seconds=6), S(2, "wait", seconds=6), S(3, "wait", seconds=1)]))
+        self.assertEqual(r.status, "failed")
+
+
+class NewSteps(PlayerCase):
+    async def test_a_search_goes_to_the_engine_with_the_query_encoded(self):
+        page = self.build()
+        pb = make_pb([S(1, "search", engine="duckduckgo", query="{{term}}")], variables=[Variable(name="term")])
+        r = await self.run_pb(pb, {"term": "red shoes & socks=1"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions, [("navigate", {"url": "https://duckduckgo.com/?q=red+shoes+%26+socks%3D1", "new_tab": False})])
+
+    async def test_a_search_value_cannot_change_the_site(self):
+        page = self.build()
+        pb = make_pb([S(1, "search", engine="bing", query="{{term}}")], variables=[Variable(name="term")])
+        await self.run_pb(pb, {"term": "x&redirect=https://evil.org/#"})
+        self.assertEqual(urlparse_host(page.actions[0][1]["url"]), "www.bing.com")
+
+    async def test_a_tab_step_switches_by_position(self):
+        page = self.build()
+        r = await self.run_pb(make_pb([S(1, "tab", tab_index=1), S(2, "tab", tab_index=2, close_tab=True)]))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions, [("switch", {"tab_id": "BBBB"}), ("close", {"tab_id": "CCCC"})])
+
+    async def test_a_missing_tab_stops_the_run(self):
+        page = self.build()
+        r = await self.run_pb(make_pb([S(1, "tab", tab_index=5)]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("no tab number 6 (only 3 open)", r.error)
+        self.assertEqual(page.actions, [])
+
+    async def test_a_handoff_waits_for_the_user_and_carries_on(self):
+        page = self.build()
+        r = await self.run_pb(make_pb([S(1, "handoff", message="Solve the CAPTCHA"), S(2, "wait", seconds=1)]))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [("handoff", "Your turn")])
+        self.assertEqual(self.inner.details, ["Solve the CAPTCHA"])
+        self.assertEqual(r.steps[0].approval, "asked")
+
+    async def test_a_handoff_the_user_declines_stops_the_run(self):
+        self.inner.answer = False
+        self.build()
+        r = await self.run_pb(make_pb([S(1, "handoff", message="Solve the CAPTCHA"), S(2, "wait", seconds=1)]))
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("You didn't continue: Solve the CAPTCHA", r.error)
+        self.assertEqual(len(r.steps), 1)
+
+    async def test_an_unattended_handoff_never_asks_and_stops(self):
+        self.build(attended=False)
+        r = await self.run_pb(make_pb([S(1, "handoff", message="Solve the CAPTCHA")]))
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("Needs you: Solve the CAPTCHA", r.error)
+        self.assertEqual(self.inner.asked, [])
+
+    async def test_a_handoff_is_never_covered_by_an_approval(self):
+        self.inner.answer = False
+        self.build()
+        r = await self.run_pb(make_pb([S(1, "handoff", message="m")], approve=True))
+        self.assertEqual(r.status, "needs_you")                    # approving the playbook did not answer for the user
+
+    async def test_the_user_leaving_the_approved_sites_during_a_handoff_stops_the_run(self):
+        page = self.build(url="https://a.com/")
+        self.inner.then = lambda: setattr(page, "url_", "https://evil.org/")
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/"), S(2, "handoff", message="log in"),
+                                       S(3, "wait", seconds=1)]))
+        self.assertEqual(r.status, "failed")
+        self.assertTrue(r.steps[1].fatal)
+
+
+class SignInWalls(PlayerCase):
+    WALL = "https://www.linkedin.com/authwall?trk=x"
+
+    def profile_pb(self):
+        return make_pb([S(1, "open", url="{{p}}"), S(2, "wait", seconds=1)], variables=[Variable(name="p", type="linkedin_url")])
+
+    async def test_the_user_signs_in_and_the_run_carries_on(self):
+        page = self.build()
+        page.redirect["https://www.linkedin.com/in/jane"] = self.WALL
+        self.inner.then = lambda: setattr(page, "url_", "https://www.linkedin.com/in/jane")      # they signed in
+        r = await self.run_pb(self.profile_pb(), {"p": "https://www.linkedin.com/in/jane"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [("handoff", "Sign in needed")])
+        self.assertEqual(r.steps[0].approval, "asked")
+        self.assertEqual(len(r.steps), 2)
+
+    async def test_pressing_continue_without_signing_in_stops(self):
+        page = self.build()
+        page.redirect["https://www.linkedin.com/in/jane"] = self.WALL
+        r = await self.run_pb(self.profile_pb(), {"p": "https://www.linkedin.com/in/jane"})
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("still asking you to sign in", r.error)
+
+    async def test_skipping_the_hand_off_stops(self):
+        self.inner.answer = False
+        page = self.build()
+        page.redirect["https://www.linkedin.com/in/jane"] = self.WALL
+        r = await self.run_pb(self.profile_pb(), {"p": "https://www.linkedin.com/in/jane"})
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("run again", r.error)
+
+    async def test_unattended_stops_without_asking(self):
+        page = self.build(attended=False)
+        page.redirect["https://www.linkedin.com/in/jane"] = self.WALL
+        r = await self.run_pb(self.profile_pb(), {"p": "https://www.linkedin.com/in/jane"})
+        self.assertEqual(r.status, "needs_you")
+        self.assertEqual(self.inner.asked, [])
+
+    async def test_a_wall_reached_by_a_click_is_noticed_too(self):
+        page = self.build([el(1, "Profile", h=1)])
+        page.after[("click", 1)] = "https://a.com/login?next=/x"
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Profile", h=1)),
+                                       S(3, "wait", seconds=1)]))
+        self.assertEqual(r.status, "needs_you")
+        self.assertEqual(len(r.steps), 2)
+
+    async def test_a_playbook_with_a_handoff_step_handles_sign_in_itself(self):
+        page = self.build()
+        page.redirect["https://a.com/"] = "https://a.com/login"
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/"), S(2, "handoff", message="Sign in"),
+                                       S(3, "wait", seconds=1)]))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [("handoff", "Your turn")])          # asked once, by the step, not twice
+
+    async def test_a_playbook_that_signs_in_itself_is_left_alone(self):
+        page = self.build([el(1, "Email", "input", h=1)])
+        page.redirect["https://a.com/"] = "https://a.com/login"
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/", check=Check(hosts=["a.com"])),
+                                       S(2, "type", target=fp("Email", "input", h=1), text="<secret>user</secret>")]))
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [])
+
+
+class Settling(PlayerCase):
+    async def test_the_page_is_settled_after_each_action_but_not_after_a_plain_wait(self):
+        page = self.build([el(1, "Go", h=1)])
+        r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Go", h=1)),
+                                       S(3, "back"), S(4, "wait", seconds=1)]))
+        self.assertEqual(r.status, "done")
+        self.assertEqual(page.settled, 3)
+
+    async def test_a_driver_without_settle_still_works(self):
+        page = self.build()
+        del type(page).settle
+        try:
+            r = await self.run_pb(make_pb([S(1, "back")]))
+        finally:
+            async def settle(self_):
+                self_.settled += 1
+                if self_.settle_error is not None:
+                    raise self_.settle_error
+            type(page).settle = settle
+        self.assertEqual(r.status, "done")
+
+    async def test_a_failing_settle_does_not_fail_the_step(self):
+        page = self.build()
+        page.settle_error = RuntimeError("page is gone")
+        r = await self.run_pb(make_pb([S(1, "back")]))
+        self.assertEqual(r.status, "done")
+
+    async def test_cancellation_during_settle_is_not_swallowed(self):
+        page = self.build()
+        page.settle_error = asyncio.CancelledError()
+        with self.assertRaises(asyncio.CancelledError):
+            await self.run_pb(make_pb([S(1, "back")]))
+
+
+def urlparse_host(url):
+    from urllib.parse import urlparse
+    return urlparse(url).hostname
+
+
+class OpenChecks(PlayerCase):
+    async def test_a_sign_in_wall_needs_you(self):
+        page = self.build()
+        page.redirect["https://www.linkedin.com/in/jane"] = "https://www.linkedin.com/authwall?trk=x"
+        pb = make_pb([S(1, "open", url="{{p}}"), S(2, "wait", seconds=1)],
+                     variables=[Variable(name="p", type="linkedin_url")])
+        r = await self.run_pb(pb, {"p": "https://www.linkedin.com/in/jane"})
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("asking you to sign in", r.error)
+        self.assertEqual(len(r.steps), 1)
+
+    async def test_ordinary_pages_that_merely_contain_login_words_are_not_stopped(self):
+        for path in ("/session-info", "/sso-help", "/sessions", "/loginhelp", "/blog/login-tips", "/signing"):
+            page = self.build()
+            r = await self.run_pb(make_pb([S(1, "open", url="https://a.com" + path)]))
+            self.assertEqual(r.status, "done", path)
+        for path in ("/login", "/login/", "/uas/login?x=1", "/checkpoint/challenge", "/authwall?trk=1", "/signin"):
+            self.build()
+            r = await self.run_pb(make_pb([S(1, "open", url="https://a.com" + path)]))
+            self.assertEqual(r.status, "needs_you", path)
+
+    async def test_a_login_playbook_may_open_a_login_page(self):
+        page = self.build([el(1, "Email", "input", h=1)])
+        pb = make_pb([S(1, "open", url="https://a.com/login"),
+                      S(2, "type", target=fp("Email", "input", h=1), text="<secret>user</secret>")])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "done", r.error)
+
+    async def test_landing_on_the_wrong_site_fails_the_check(self):
+        page = self.build()
+        page.redirect["https://a.com/"] = "https://tracker.example.net/"
+        pb = make_pb([S(1, "open", url="https://a.com/", check=Check(hosts=["a.com", "tracker.example.net"]))])
+        self.assertEqual((await self.run_pb(pb)).status, "done")
+        self.build().redirect["https://a.com/"] = "https://elsewhere.org/"
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "failed")
+
+    async def test_a_url_variable_may_land_on_any_of_its_allowed_sites(self):
+        page = self.build()
+        pb = make_pb([S(1, "open", url="{{u}}", check=Check(hosts=["a.com"]))],
+                     variables=[Variable(name="u", type="url", allowed_hosts=["a.com", "b.com"])])
+        r = await self.run_pb(pb, {"u": "https://b.com/page"})
+        self.assertEqual(r.status, "done", r.error)
+
+    async def test_linkedin_profile_url_end_to_end(self):
+        page = self.build()
+        pb = make_pb([S(1, "open", url="{{profile_url}}", check=Check(hosts=["www.linkedin.com"]))],
+                     variables=[Variable(name="profile_url", type="linkedin_url")], approve=True)
+        r = await self.run_pb(pb, {"profile_url": "https://www.linkedin.com/in/jane-doe"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions, [("navigate", {"url": "https://www.linkedin.com/in/jane-doe", "new_tab": False})])
+        self.assertEqual(page.url_, "https://www.linkedin.com/in/jane-doe")
+
+
+class AiSteps(PlayerCase):
+    async def test_extract_reads_the_page_and_reports_it(self):
+        page = self.build()
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "extract", query="the name and title")])
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(r.outputs, [{"step_id": "s2", "query": "the name and title", "text": "Jane Doe, Engineer"}])
+        self.assertIn("Jane Doe, Engineer", summarize(pb, r))
+        self.assertEqual(page.actions[1], ("extract", {"query": "the name and title"}))
+
+    async def test_extract_without_a_model_fails_clearly(self):
+        page = self.build()
+        page.has_llm = False
+        r = await self.run_pb(make_pb([S(1, "extract", query="q")]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("none is set up", r.error)
+        self.assertEqual(page.actions, [])
+
+    async def test_a_long_extract_is_clipped(self):
+        page = self.build()
+        page.extract_text = "x" * 50000
+        r = await self.run_pb(make_pb([S(1, "extract", query="q")]))
+        self.assertEqual(len(r.outputs[0]["text"]), 20000)
+
+    async def test_an_ai_step_is_not_guessed_at(self):
+        page = self.build()
+        r = await self.run_pb(make_pb([S(1, "ai", query="decide what to do"), S(2, "wait", seconds=1)]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("needs an AI", r.error)
+        self.assertEqual(len(r.steps), 1)
+
+    async def test_extract_query_uses_the_inputs(self):
+        page = self.build()
+        pb = make_pb([S(1, "extract", query="what does {{who}} do")], variables=[Variable(name="who")])
+        await self.run_pb(pb, {"who": "Jane"})
+        self.assertEqual(page.actions[0][1]["query"], "what does Jane do")
+
+
+class Robustness(PlayerCase):
+    async def test_a_driver_crash_is_a_failed_step_not_a_crash(self):
+        page = self.build()
+        page.raise_on = "go_back"
+        r = await self.run_pb(make_pb([S(1, "back")]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("driver exploded", r.error)
+
+    async def test_cancellation_is_not_swallowed(self):
+        page = self.build()
+        async def hang(name, params): raise asyncio.CancelledError()
+        page.act = hang
+        with self.assertRaises(asyncio.CancelledError):
+            await self.run_pb(make_pb([S(1, "back")]))
+
+    async def test_a_run_that_takes_too_long_stops(self):
+        self.build(max_seconds=10)
+        r = await self.run_pb(make_pb([S(1, "wait", seconds=8), S(2, "wait", seconds=8), S(3, "wait", seconds=1)]))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("took longer", r.error)
+        self.assertEqual(len(r.steps), 2)
+
+    async def test_a_page_with_no_url_does_not_break_the_checks(self):
+        page = self.build()
+        async def broken_url(): raise RuntimeError("no page")
+        page.url = broken_url
+        r = await self.run_pb(make_pb([S(1, "wait", seconds=1)]))
+        self.assertEqual(r.status, "done")
+
+    async def test_the_summary_for_each_outcome(self):
+        page = self.build()
+        pb = make_pb([S(1, "wait", seconds=1), S(2, "ai", query="x")], name="My run")
+        r = await self.run_pb(pb)
+        self.assertIn('"My run" stopped after 1 of 2 steps', summarize(pb, r))
+        ok = await self.run_pb(make_pb([S(1, "wait", seconds=1)], name="My run"))
+        self.assertIn("all 1 step done", summarize(make_pb([S(1, "wait", seconds=1)], name="My run"), ok))
+        needs = self.build([el(4, "Send")], attended=False)
+        needs.risky[4] = "Click Send?"
+        r3 = await self.run_pb(make_pb([S(1, "click", target=fp("Send"), ask=True)]))
+        self.assertIn("needs you", summarize(make_pb([S(1, "click", target=fp("Send"), ask=True)]), r3))
+
+
+class ApproverUnit(unittest.IsolatedAsyncioTestCase):
+    async def test_a_handoff_is_never_pre_approved(self):
+        inner = Inner(True)
+        a = StepApprover(inner, attended=True)
+        a.begin(True)
+        self.assertTrue(await a.ask("handoff", "Solve it"))
+        self.assertEqual(inner.asked, [("handoff", "Solve it")])
+
+    async def test_no_inner_approver_fails_closed(self):
+        a = StepApprover(None, attended=True)
+        a.begin(False)
+        self.assertFalse(await a.ask("approve", "x"))
+        self.assertEqual(a.last, "unattended")
+
+    async def test_begin_resets_the_decision(self):
+        a = StepApprover(Inner(True), attended=True)
+        a.begin(True); await a.ask("approve", "x"); self.assertEqual(a.last, "preapproved")
+        a.begin(False); self.assertIsNone(a.last)
+
+
+if __name__ == "__main__":
+    unittest.main()

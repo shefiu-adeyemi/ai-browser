@@ -6,8 +6,13 @@ import ui_feed
 from ui_feed import UIFeed, clean, redact
 
 
-def rec(msg, name="browser_use.Agent", level=logging.INFO):
-    return logging.LogRecord(name, level, __file__, 1, msg, None, None)
+def rec(msg, name="browser_use.Agent", level=logging.INFO, path=__file__):
+    return logging.LogRecord(name, level, path, 1, msg, None, None)
+
+
+SITE = "C:/Python312/Lib/site-packages/browser_use/"
+BS = chr(92)
+
 
 
 KEY = "sk-abcdefghijklmnopqrstuvwxyz123456"
@@ -24,6 +29,20 @@ class Feed(unittest.TestCase):
     def test_browser_internals_and_other_libraries_stay_out(self):
         for name in ("browser_use.BrowserSession", "browser_use.browser.session", "bubus", "httpx", "uvicorn.error"):
             self.assertIsNone(self.feed.prepare(rec("x", name)))
+
+    def test_real_records_are_recognised_by_source_file_not_by_the_renamed_logger(self):
+        """browser-use renames record.name to "Agent" / "tools" / "BrowserSession" while formatting, which
+        made the name-based filter drop EVERY line in the running app. The source file does not change."""
+        for name, file in (("Agent", "agent/service.py"), ("tools", "tools/service.py"), ("agent", "agent/views.py")):
+            self.assertEqual(self.feed.prepare(rec("📍 Step 1: go", name, path=SITE + file))["step"], 1, name)
+        for name, file in (("BrowserSession", "browser/session.py"), ("service", "telemetry/service.py")):
+            self.assertIsNone(self.feed.prepare(rec("internals", name, path=SITE + file)), name)
+        self.assertEqual(self.feed.prepare(rec("crashed", "BrowserSession", logging.ERROR, SITE + "browser/session.py"))["text"], "crashed")
+        self.assertIsNone(self.feed.prepare(rec("x", "Agent", path="C:/Python312/Lib/site-packages/httpx/_client.py")))
+
+    def test_windows_style_paths_work_too(self):
+        path = BS.join(["C:", "Python312", "Lib", "site-packages", "browser_use", "agent", "service.py"])
+        self.assertEqual(self.feed.prepare(rec("📍 Step 2: go", "Agent", path=path))["step"], 2)
 
     def test_problems_from_anywhere_in_browser_use_are_shown(self):
         self.assertEqual(self.feed.prepare(rec("crashed", "browser_use.BrowserSession", logging.ERROR))["text"], "crashed")

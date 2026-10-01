@@ -20,6 +20,14 @@ Your keys and browser profiles are stored **outside this folder**, in
 `%LOCALAPPDATA%\AIBrowserAgent` (set `AIBA_DATA_DIR` to move it). Nothing secret lives in the
 project, so the folder can be zipped or committed safely. `.env.example` documents every option.
 
+## Browsing by hand
+
+The browser view has a tab strip, back / forward / reload and an address bar. Type an address to
+open it, or any other text to search. It is look-only while the agent works (stop it first), and
+usable during a CAPTCHA hand-off. Only `http` and `https` addresses open; this app's own address and
+addresses with a username or password in them are refused. To run a second copy beside the first
+(for testing) set `AIBA_PORT` and `AIBA_DATA_DIR`.
+
 ## Safety
 
 - The agent only ever types your stored credentials into that site's own login form.

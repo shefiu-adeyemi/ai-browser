@@ -54,6 +54,19 @@ def clean(text: str, secrets: Iterable[str] = ()) -> str:
     return flat if len(flat) <= MAX_LINE else flat[: MAX_LINE - 1].rstrip() + "…"
 
 
+def _origin(record: logging.LogRecord) -> str:
+    """'agent' (the agent and its tools), 'browser_use' (anything else in it) or '' (not browser-use).
+
+    Decided by the SOURCE FILE, not the logger name: browser-use rewrites record.name to a short label
+    ("Agent", "tools", "BrowserSession") while it formats a line, so by the time our handler runs the
+    name is no longer "browser_use.agent.service" and a name check silently matches nothing.
+    """
+    path = str(getattr(record, "pathname", "")).replace(chr(92), "/")
+    if "/browser_use/" in path:
+        return "agent" if ("/browser_use/agent/" in path or "/browser_use/tools/" in path) else "browser_use"
+    return "agent" if record.name.startswith(_ALLOWED_PREFIXES) else ("browser_use" if record.name.startswith("browser_use") else "")
+
+
 class UIFeed:
     def __init__(self, secrets: Callable[[], Iterable[str]] = env_secrets) -> None:
         self._secrets = secrets
@@ -64,8 +77,8 @@ class UIFeed:
             return None
         # The agent's own narration at INFO; warnings and errors from anywhere in browser-use too,
         # so "the browser crashed" is visible instead of only in the server log.
-        if not (record.name.startswith(_ALLOWED_PREFIXES)
-                or (record.levelno >= logging.WARNING and record.name.startswith("browser_use"))):
+        where = _origin(record)
+        if not (where == "agent" or (where == "browser_use" and record.levelno >= logging.WARNING)):
             return None
         text = clean(record.getMessage(), self._secrets())
         if not text:

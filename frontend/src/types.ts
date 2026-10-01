@@ -18,6 +18,25 @@ export interface Turn {
   duration?: number
   pending?: boolean
   stepCount?: number
+  error?: boolean   // the run ended in an error (the bubble offers Retry / Settings)
+}
+
+// The browser toolbar's view of the agent's browser (GET /browser/state)
+export interface BrowserTab {
+  id: string
+  title: string
+  url: string
+}
+
+export interface BrowserState {
+  ready: boolean
+  tabs: BrowserTab[]
+  active: string | null
+  can_back: boolean
+  can_forward: boolean
+  url: string
+  title: string
+  locked: boolean
 }
 
 export interface SessionInfo {
@@ -79,7 +98,113 @@ export type WsMessage =
   | { type: 'approval_done'; id: string }
   | { type: 'session_changed'; id: string; history: Array<{ role: 'user' | 'agent'; content: string; ts: string }> }
 
+// ── Playbooks (server: playbook.py, the single source of truth for the format) ──
+export interface PlaybookFingerprint {
+  node_name: string
+  attributes: Record<string, string>
+  ax_name?: string | null
+}
+
+export interface PlaybookStep {
+  id: string
+  kind: 'open' | 'search' | 'back' | 'click' | 'type' | 'select' | 'key' | 'scroll' | 'wait' | 'tab' | 'handoff' | 'extract' | 'ai'
+  tag: 'deterministic' | 'ai'
+  note: string
+  url?: string | null
+  text?: string | null
+  keys?: string | null
+  seconds?: number | null
+  query?: string | null
+  engine?: string | null
+  message?: string | null
+  tab_index?: number | null
+  close_tab?: boolean
+  ask: boolean
+  target?: PlaybookFingerprint | null
+  [more: string]: unknown        // fields the screen doesn't show are passed back to the server untouched
+}
+
+export interface PlaybookVariable {
+  name: string
+  type: 'text' | 'number' | 'url' | 'linkedin_url'
+  label: string
+  default?: string | null
+  required: boolean
+  allowed_hosts: string[]
+  [more: string]: unknown
+}
+
+export interface Playbook {
+  id: string
+  name: string
+  description: string
+  version: number
+  variables: PlaybookVariable[]
+  steps: PlaybookStep[]
+  domains: string[]
+  [more: string]: unknown
+}
+
+export interface VariableSuggestion {
+  step_id: string
+  field: 'url' | 'text' | 'query'
+  value: string
+  name: string
+  type: PlaybookVariable['type']
+  allowed_hosts: string[]
+  reason: string
+}
+
+export interface PlaybookSummary {
+  id: string
+  name: string
+  description: string
+  version: number
+  updated_at: string
+  steps: number
+  ai_steps: number
+  variables: string[]
+  domains: string[]
+  approved: boolean
+}
+
 // Input events sent from frontend → backend → CDP
 export type InputMessage =
   | { type: 'input'; kind: 'mouse'; event: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel'; x: number; y: number; button?: string; clickCount?: number; deltaX?: number; deltaY?: number; modifiers?: number }
   | { type: 'input'; kind: 'key'; event: 'keyDown' | 'keyUp' | 'char' | 'insertText'; key?: string; code?: string; text?: string; keyCode?: number; modifiers?: number }
+
+export interface PlaybookRunSummary {
+  run_id: string
+  status: 'done' | 'failed' | 'needs_you' | 'stopped'
+  started_at: number
+  finished_at: number
+  seconds: number
+  attended: boolean
+  error: string
+  playbook_version: number
+  steps: number
+  ok_steps: number
+}
+
+export interface PlaybookStepResult {
+  id: string
+  kind: string
+  note: string
+  status: 'ok' | 'failed' | 'needs_you'
+  detail: string
+  seconds: number
+  matched?: string | null
+  approval?: string | null
+  output?: string | null
+}
+
+export interface PlaybookRunRecord extends Omit<PlaybookRunSummary, 'steps' | 'ok_steps'> {
+  inputs: Record<string, string>
+  steps: PlaybookStepResult[]
+  outputs: { step_id: string; query: string; text: string }[]
+}
+
+export interface DamagedPlaybook {
+  id: string
+  problem: string
+}

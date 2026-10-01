@@ -56,6 +56,16 @@ _LONG_QUERY = 200            # a URL query this long is more likely smuggled dat
 _ACTIVATE_KEYS = {"enter", "return", "space", " "}
 
 
+def is_risky_label(text: str) -> bool:
+    """Does a control's visible text say it reaches other people, spends money or can't be undone?"""
+    return bool(_RISKY_LABEL.search(text or ""))
+
+
+def activates_with(keys: str) -> bool:
+    """Would these keys press a focused control (Enter/Space)?"""
+    return _activates(keys)[0]
+
+
 def _activates(keys: str) -> tuple[bool, bool]:
     """(presses Enter/Space, moves focus with Tab) for a send_keys string like 'Tab Tab Enter'."""
     tokens = [t.split("+")[-1].lower() for t in str(keys).split()] or [str(keys).lower()]

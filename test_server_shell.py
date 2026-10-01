@@ -107,12 +107,17 @@ class Shell(unittest.IsolatedAsyncioTestCase):
                 order.append("running")
         self.assertEqual(order, ["up", "running", "down"])
 
+    def test_the_session_cookie_is_per_port(self):
+        """Browsers share cookies between ports of one host, so two copies of the app (e.g. port 8000 and a
+        test copy) overwrote each other's token and logged each other out."""
+        self.assertIn(str(agent_ui.PORT), agent_ui._COOKIE_NAME)
+
     def test_no_deprecated_event_hooks(self):
         self.assertNotIn("on_event(", (ROOT / "agent_ui.py").read_text(encoding="utf-8"))
 
     def test_the_inline_legacy_ui_is_gone(self):
         source = (ROOT / "agent_ui.py").read_text(encoding="utf-8")
-        self.assertLess(len(source.splitlines()), 1200)
+        self.assertLess(source.count("<div") + source.count("<script"), 3)         # no page markup inline
         self.assertEqual(source.count("<!DOCTYPE html>"), 1)        # only the tiny 'not built' page
 
     def test_without_a_build_the_page_says_how_to_build_it(self):
