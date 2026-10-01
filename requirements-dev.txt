@@ -9,6 +9,6 @@ pyinstaller>=6.0
 # suite does not silently depend on that.
 httpx>=0.28
 
-# Also needed to build the web UI: Node.js 18+, then:  cd frontend && npm install && npm run build
+# Also needed to build the web UI: Node.js 22+, then:  cd frontend && npm install && npm run build
 # Tests:  python -m unittest          (fast)
 #         RUN_BROWSER_TESTS=1 python -m unittest   (launches a real Chromium; slow)
