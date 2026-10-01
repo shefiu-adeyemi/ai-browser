@@ -217,7 +217,8 @@ and the reviewer of a chat task stays on Standard. Changing a step's tier does n
 (it changes cost, not what the playbook may do). The run record says which model read the page and how many tokens
 it used. A retry's Strong model may be from another provider (never DeepSeek).
 Prices (built): optional, typed by the user per model (per million tokens, input and output, in their own currency; the app ships none, since they differ by account and change). Settings then shows an estimated cost for the last 7 days; tokens of a model with no price are listed apart, never guessed.
-Not built: a per-run or monthly cost cap (feature 7), the Strong model for natural-language drafting and the Fast model
+Business model note: users bring their own provider keys and pay the providers directly, so the app never meters or bills usage; prices and estimates are information for the user only. A spend limit that pauses scheduled runs (feature 7) is optional user protection, off by default, low priority.
+Not built: that optional spend limit, the Strong model for natural-language drafting and the Fast model
 for self-repair (those features do not exist yet; the router already has "draft" and "repair" jobs for them).
 
 
