@@ -109,7 +109,7 @@ export default function BrowserChrome({ state, currentUrl, locked, controlling, 
               className={cn(
                 'group flex h-8 min-w-[110px] max-w-[200px] items-center gap-1.5 rounded-t-lg border-t-2 px-3 text-[12px]',
                 active
-                  ? 'border-brand bg-white font-semibold text-gray-900 shadow-[0_-2px_6px_rgba(0,0,0,0.08)]'
+                  ? 'border-transparent bg-white font-semibold text-gray-900 shadow-[0_-2px_6px_rgba(0,0,0,0.08)]'
                   : 'cursor-pointer border-transparent bg-gray-300/50 text-gray-600 hover:bg-gray-100',
                 locked && !active && 'cursor-not-allowed opacity-70',
               )}
