@@ -330,7 +330,9 @@ export default function App() {
     }
   }, [fetchSessions])
 
-  const sendTask = useCallback(async (task: string, fmt: FormatOption) => {
+  const lastTierRef = useRef('auto')      // a Retry keeps the tier the failed task used
+  const sendTask = useCallback(async (task: string, fmt: FormatOption, tier: string = 'auto') => {
+    lastTierRef.current = tier
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
     // Add user bubble
@@ -368,7 +370,7 @@ export default function App() {
       const res = await fetch('/task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task, fmt }),
+        body: JSON.stringify({ task, fmt, tier }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || data.ok === false) {
@@ -457,12 +459,12 @@ export default function App() {
 
   // Returns true once the server has the answer. On failure the prompt stays up, because the
   // agent is still blocked waiting for it (it denies on its own only after the timeout).
-  const answerApproval = useCallback(async (id: string, allow: boolean): Promise<boolean> => {
+  const answerApproval = useCallback(async (id: string, allow: boolean, text?: string, remember?: boolean): Promise<boolean> => {
     try {
       const res = await fetch(`/approvals/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allow }),
+        body: JSON.stringify(text === undefined ? { allow } : { allow, text, remember: remember === true }),
       })
       if (!res.ok) return false
       setApproval((a) => (a && a.id === id ? null : a))
@@ -474,7 +476,7 @@ export default function App() {
 
   const handleRetry = useCallback(() => {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user')
-    if (lastUser) sendTask(lastUser.content, 'auto')
+    if (lastUser) sendTask(lastUser.content, 'auto', lastTierRef.current)
   }, [messages, sendTask])
 
   useEffect(() => {

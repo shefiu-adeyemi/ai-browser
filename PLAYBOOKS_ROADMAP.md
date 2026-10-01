@@ -200,3 +200,37 @@ Selection:
 
 Status: all five features are planned and approved. Nothing is built yet. Phase 1 (playbook core, with the
 format above) starts next, after the user's go-ahead.
+
+
+## Model tiers: built (status)
+`model_tiers.py` plus a "Model tiers" section in Settings. Three slots: Fast, Standard (the existing provider/model
+setting), Strong. A fixed table gives each job its first tier (reading a page and shortening history: Fast; the
+agent's own steps and the reviewer: Standard; a retry after an incomplete attempt and drafting: Strong). A slot that
+is unset, or whose provider has no API key, uses the Standard model; the router can be switched off
+(`LLM_ROUTER=off`) to behave as before tiers. A call that fails on a tier is tried once on the next tier up
+(`TieredLLM`), bounded by the three slots. Every answered call is counted by tier and model (tokens, not prices) and
+shown for the last 7 days. Choosing a tier (built): a page-reading step in a playbook can be set to Fast, Standard or Strong on the review and
+edit screens (Automatic is the default: Fast first, a stronger one only if it fails). A chat task has a tier picker
+in the task box (Auto, Fast, Standard, Strong). The choice is a tier, never a model name, so changing the models
+behind the tiers in Settings changes every playbook at once. A chosen tier is used exactly: no step up on failure,
+and the reviewer of a chat task stays on Standard. Changing a step's tier does not change the playbook's approval
+(it changes cost, not what the playbook may do). The run record says which model read the page and how many tokens
+it used. A retry's Strong model may be from another provider (never DeepSeek).
+Prices (built): optional, typed by the user per model (per million tokens, input and output, in their own currency; the app ships none, since they differ by account and change). Settings then shows an estimated cost for the last 7 days; tokens of a model with no price are listed apart, never guessed.
+Not built: a per-run or monthly cost cap (feature 7), the Strong model for natural-language drafting and the Fast model
+for self-repair (those features do not exist yet; the router already has "draft" and "repair" jobs for them).
+
+
+## Note for future integration: planner / master agent (decided 2026-10-01: version 2)
+Today there is no master agent. Coordination is plain code (task controller, scheduler, router table); a model decides
+only (1) the next action inside a chat task's agent loop and (2) page reading in a playbook. The idea of a planning
+agent that makes a plan first and lets cheaper models or code carry it out was considered and postponed.
+- Why not now: an extra planning call on every task; plans go stale when pages differ; more things acting on the browser
+  (more safety surface and prompt-injection risk); harder to test and to explain a failure (plan or execution?).
+- What already covers the idea safely: natural language to playbook (feature 5). The Strong model drafts once (the router
+  already has a "draft" job on Strong), the draft becomes plain steps, the user reviews and approves, and every later run
+  replays without AI.
+- Build order stays: checkpoints, natural language to playbook, self-repair of broken steps (Fast model, "repair" job).
+- When to revisit: only if real usage shows long one-off tasks where the agent loop wastes tokens or wanders. Check the
+  usage-by-tier numbers (Settings, Model tiers) first. If built, the plan must be shown to the user and approved
+  before it acts, every sub-step still goes through GuardedTools, and a stale plan must stop and ask, not improvise.

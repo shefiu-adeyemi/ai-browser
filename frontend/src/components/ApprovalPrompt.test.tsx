@@ -7,6 +7,48 @@ import type { ApprovalRequest } from '@/types'
 const ask: ApprovalRequest = { id: 'a1', kind: 'approve', title: 'Click "Send"', detail: 'sends it', url: 'https://x.test/', timeout: 180 }
 const handoff: ApprovalRequest = { ...ask, id: 'h1', kind: 'handoff', title: 'Solve the CAPTCHA' }
 
+const typed: ApprovalRequest = { ...ask, id: 't1', kind: 'input', title: 'What is the code?' }
+
+describe('ApprovalPrompt (typed answer)', () => {
+  it('cannot send until something is typed, then sends the text', async () => {
+    const onAnswer = vi.fn().mockResolvedValue(true)
+    render(<ApprovalPrompt request={typed} onAnswer={onAnswer} />)
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    await userEvent.type(screen.getByLabelText('Your answer'), '123456')
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(onAnswer).toHaveBeenCalledWith('t1', true, '123456', false)
+  })
+
+  it('sends whether to remember it, off unless ticked', async () => {
+    const onAnswer = vi.fn().mockResolvedValue(true)
+    render(<ApprovalPrompt request={typed} onAnswer={onAnswer} />)
+    await userEvent.type(screen.getByLabelText('Your answer'), '7')
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(onAnswer).toHaveBeenLastCalledWith('t1', true, '7', false)
+    onAnswer.mockClear()
+    render(<ApprovalPrompt request={{ ...typed, id: 't2' }} onAnswer={onAnswer} />)
+    await userEvent.type(screen.getAllByLabelText('Your answer')[1], '8')
+    await userEvent.click(screen.getAllByRole('checkbox', { name: /Remember this/ })[1])
+    await userEvent.click(screen.getAllByRole('button', { name: 'Send' })[1])
+    expect(onAnswer).toHaveBeenLastCalledWith('t2', true, '8', true)
+  })
+
+  it('Enter sends, Cancel says no', async () => {
+    const onAnswer = vi.fn().mockResolvedValue(true)
+    render(<ApprovalPrompt request={typed} onAnswer={onAnswer} />)
+    await userEvent.type(screen.getByLabelText('Your answer'), '9{Enter}')
+    expect(onAnswer).toHaveBeenCalledWith('t1', true, '9', false)
+  })
+
+  it('Cancel answers no with no text', async () => {
+    const onAnswer = vi.fn().mockResolvedValue(true)
+    render(<ApprovalPrompt request={typed} onAnswer={onAnswer} />)
+    await userEvent.type(screen.getByLabelText('Your answer'), 'x')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onAnswer).toHaveBeenCalledWith('t1', false, 'x', false)
+  })
+})
+
 describe('ApprovalPrompt (approve)', () => {
   it('puts the focus on Deny, never on Approve, so a stray Enter cannot approve', () => {
     render(<ApprovalPrompt request={ask} onAnswer={vi.fn()} />)

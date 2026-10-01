@@ -85,8 +85,15 @@ class ParkedRun(BaseModel):
     parked_at: str = ""
     expires_at: str = ""                                      # no answer by then means NO: the run is cancelled
     approved: list[str] = Field(default_factory=list)         # approve steps already answered yes in this run
+    done: list[str] = Field(default_factory=list)             # risky steps that already ran: never repeated on resume
     values: dict[str, str] = Field(default_factory=dict)      # the inputs it was started with (the answer is for THESE)
     pb_hash: str = ""                                         # the approved playbook it belongs to (changed = cancelled)
+    kind: Literal["approve", "input"] = "approve"             # a yes/no question, or a value to type in
+    variable: str = ""                                        # input: the playbook variable the answer fills
+    on_timeout: Literal["cancel", "skip"] = "cancel"          # approve: what no answer in time means
+    guarded: str = ""                                         # approve: the risky step it guards (left out on "skip")
+    typed: list[str] = Field(default_factory=list)            # input steps already answered (the VALUES are kept in memory only)
+    skipped: list[str] = Field(default_factory=list)          # risky steps left out because nobody answered
 
 
 class ScheduleState(BaseModel):

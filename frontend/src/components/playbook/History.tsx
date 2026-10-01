@@ -8,6 +8,10 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   failed: { label: 'Failed', cls: 'bg-red-50 text-red-700' },
   needs_you: { label: 'Needs you', cls: 'bg-amber-50 text-amber-700' },
   stopped: { label: 'Stopped', cls: 'bg-gray-100 text-gray-600' },
+  waiting: { label: 'Waiting for you', cls: 'bg-amber-50 text-amber-700' },
+  declined: { label: 'You said no', cls: 'bg-gray-100 text-gray-600' },
+  expired: { label: 'No answer', cls: 'bg-gray-100 text-gray-600' },
+  cancelled: { label: 'Cancelled', cls: 'bg-gray-100 text-gray-600' },
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -94,6 +98,8 @@ export default function History({ id, name, onBack, onEdit }: { id: string; name
                   <p className="mt-0.5 text-[11px] text-gray-400">
                     {s.seconds}s
                     {s.matched ? ` · found by ${s.matched}` : ''}
+                    {s.model ? ` · read by ${s.model}` : ''}
+                    {s.tokens ? ` · ${s.tokens >= 1000 ? `${(s.tokens / 1000).toFixed(1)}k` : s.tokens} tokens` : ''}
                     {s.approval === 'preapproved' ? ' · pre-approved' : s.approval === 'asked' ? ' · you approved it' : ''}
                   </p>
                 </div>

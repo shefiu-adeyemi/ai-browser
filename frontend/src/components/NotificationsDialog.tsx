@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Bell, CheckCircle2, Info, X } from 'lucide-react'
 import type { NotificationItem } from '@/types'
-import { errText, formatWhen, readJson, reasonOf } from './playbook/shared'
+import ValueAnswer from './playbook/ValueAnswer'
+import { answerCheckpoint, errText, formatWhen, readJson, reasonOf } from './playbook/shared'
 
 interface Props {
   onClose: () => void
@@ -56,6 +57,15 @@ export default function NotificationsDialog({ onClose, onUnread }: Props) {
   }
   const json = (body: unknown): RequestInit => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   const unread = items?.filter((i) => !i.read).length ?? 0
+  const [answered, setAnswered] = useState<Record<string, string>>({})
+
+  const answer = async (n: NotificationItem, approve: boolean, value?: string, remember?: boolean) => {
+    if (!n.action) return
+    const why = await answerCheckpoint(n.action.schedule_id, n.action.run_id, approve, value, remember)
+    // "already answered" is fine to show as the final state; anything else is an error to read
+    setAnswered((a) => ({ ...a, [n.id]: why ? why : approve ? 'You said go ahead.' : 'You said don\'t.' }))
+    await send('/notifications/read', json({ ids: [n.id] }))
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
@@ -100,6 +110,20 @@ export default function NotificationsDialog({ onClose, onUnread }: Props) {
                     <span className="mt-0.5 block text-[11px] text-gray-400">{formatWhen(new Date(n.ts).getTime() / 1000)}</span>
                   </span>
                 </button>
+                {n.action && (
+                  <div className="-mt-1 mb-1 rounded-b-lg border border-t-0 border-brand/30 bg-white px-3 py-2">
+                    {answered[n.id] ? (
+                      <p className="text-xs text-gray-600">{answered[n.id]}</p>
+                    ) : n.action.kind === 'input' ? (
+                      <ValueAnswer label="Your answer" onSend={(v, keep) => answer(n, true, v, keep)} onCancel={() => answer(n, false)} />
+                    ) : (
+                      <div className="flex gap-2">
+                        <button onClick={() => answer(n, true)} className="rounded-md bg-brand px-3 py-1 text-xs font-medium text-white">Go ahead</button>
+                        <button onClick={() => answer(n, false)} className="rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-700">Don't</button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </li>
             ))}
           </ul>

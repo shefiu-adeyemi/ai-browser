@@ -14,6 +14,11 @@ import secrets
 from typing import Awaitable, Callable, Optional
 
 
+class Typed(str):
+    """What the user typed, and whether they asked for it to be remembered for later runs."""
+    remember: bool = False
+
+
 class ApprovalBroker:
     def __init__(
         self,
@@ -29,6 +34,14 @@ class ApprovalBroker:
 
     async def ask(self, kind: str, title: str, detail: str = "", url: str = "") -> bool:
         """kind: "approve" (allow/deny an action) or "handoff" (user does something, then continues)."""
+        return bool(await self._ask(kind, title, detail, url))
+
+    async def ask_text(self, title: str, detail: str = "", url: str = "") -> Optional[str]:
+        """Ask the user to TYPE something. None means no answer (declined, timed out, nobody there)."""
+        answer = await self._ask("input", title, detail, url)
+        return answer if isinstance(answer, str) and answer.strip() else None
+
+    async def _ask(self, kind: str, title: str, detail: str, url: str):
         if not self._has_clients():
             return False                                   # nobody to ask -> deny
         aid = secrets.token_hex(8)
@@ -51,18 +64,26 @@ class ApprovalBroker:
             except Exception:
                 pass
 
-    def resolve(self, aid: str, allow: bool) -> bool:
+    def resolve(self, aid: str, allow: bool, text: Optional[str] = None, remember: bool = False) -> bool:
         fut = self._pending.get(aid)
         if fut is None or fut.done():
             return False
-        fut.set_result(bool(allow))
+        if self._messages.get(aid, {}).get("kind") == "input":     # a typed answer, or nothing
+            if allow and isinstance(text, str):
+                typed = Typed(text)
+                typed.remember = remember is True
+                fut.set_result(typed)
+            else:
+                fut.set_result(None)
+        else:
+            fut.set_result(bool(allow))
         return True
 
     def cancel_all(self) -> None:
         """Deny everything outstanding (task stopped)."""
-        for fut in list(self._pending.values()):
+        for aid, fut in list(self._pending.items()):
             if not fut.done():
-                fut.set_result(False)
+                fut.set_result(None if self._messages.get(aid, {}).get("kind") == "input" else False)
 
     def snapshot(self) -> list[dict]:
         return list(self._messages.values())
@@ -84,6 +105,16 @@ class ConsoleApprover:
         except (EOFError, KeyboardInterrupt):
             return False
         return answer != "n" if kind == "handoff" else answer in ("y", "yes")
+
+    async def ask_text(self, title: str, detail: str = "", url: str = "") -> Optional[str]:
+        print(f"\n[Question] {title}")
+        if detail:
+            print(f"  {detail}")
+        try:
+            answer = (await asyncio.to_thread(input, "  Your answer (empty to skip): ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return answer or None
 
     def cancel_all(self) -> None:
         pass

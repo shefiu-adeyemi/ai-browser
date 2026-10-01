@@ -4,7 +4,7 @@ import type { ApprovalRequest } from '@/types'
 interface Props {
   request: ApprovalRequest
   /** Resolves true once the server has the answer; false if it couldn't be delivered. */
-  onAnswer: (id: string, allow: boolean) => Promise<boolean>
+  onAnswer: (id: string, allow: boolean, text?: string, remember?: boolean) => Promise<boolean>
   /** The agent step that asked, so the prompt can be matched to the log. */
   step?: number
 }
@@ -22,6 +22,8 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
   const [left, setLeft] = useState(request.timeout)
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [text, setText] = useState('')
+  const [remember, setRemember] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
   const denyRef = useRef<HTMLButtonElement>(null)
 
@@ -29,27 +31,30 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
     setLeft(request.timeout)
     setSending(false)
     setFailed(false)
+    setText('')
+    setRemember(false)
     const t = setInterval(() => setLeft((s) => Math.max(0, s - 1)), 1000)
     return () => clearInterval(t)
   }, [request.id, request.timeout])
 
   const handoff = request.kind === 'handoff'
+  const typed = request.kind === 'input'
 
   // An approval takes the focus, on the SAFE button: a stray Enter or Space must never send, post or
   // buy. Focus goes back to where it was afterwards. A hand-off does not steal focus: the user is
   // about to click in the browser view.
   useEffect(() => {
-    if (handoff) return
+    if (handoff || typed) return
     const before = document.activeElement as HTMLElement | null
     denyRef.current?.focus()
     cardRef.current?.scrollIntoView({ block: 'nearest' })
     return () => before?.focus?.()
-  }, [request.id, handoff])
+  }, [request.id, handoff, typed])
 
   const answer = async (allow: boolean) => {
     setSending(true)
     setFailed(false)
-    const delivered = await onAnswer(request.id, allow)
+    const delivered = typed ? await onAnswer(request.id, allow, text, remember) : await onAnswer(request.id, allow)
     if (!delivered) {
       setSending(false)
       setFailed(true)   // keep the prompt up: the agent is still waiting for this answer
@@ -63,7 +68,7 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
     }
   }
 
-  const label = `${handoff ? 'Agent needs your help' : 'Approval needed'}${step ? ` \u00b7 step ${step}` : ''} \u00b7 ${left}s`
+  const label = `${handoff ? 'Agent needs your help' : typed ? 'Your answer needed' : 'Approval needed'}${step ? ` \u00b7 step ${step}` : ''} \u00b7 ${left}s`
 
   const buttons = (
     <div className={handoff ? 'flex flex-shrink-0 items-center gap-2' : 'mt-3 flex justify-end gap-2'}>
@@ -73,14 +78,14 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
         onClick={() => answer(false)}
         className="rounded-md disabled:opacity-50 border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
       >
-        {handoff ? 'Skip' : 'Deny'}
+        {handoff ? 'Skip' : typed ? 'Cancel' : 'Deny'}
       </button>
       <button
-        disabled={sending}
+        disabled={sending || (typed && !text.trim())}
         onClick={() => answer(true)}
         className="rounded-md disabled:opacity-50 bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
       >
-        {handoff ? "I'm done \u2014 continue" : 'Approve'}
+        {handoff ? "I'm done \u2014 continue" : typed ? 'Send' : 'Approve'}
       </button>
     </div>
   )
@@ -129,6 +134,17 @@ export default function ApprovalPrompt({ request, onAnswer, step }: Props) {
         </p>
       )}
       {request.url && <p className="mt-1 truncate text-[11px] text-gray-500">{request.url}</p>}
+      {typed && (
+        <input aria-label="Your answer" value={text} maxLength={2000} autoFocus onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && text.trim() && !sending) { e.preventDefault(); answer(true) } }}
+          className="mt-2 w-full rounded-md border border-gray-300 px-2 py-1.5 text-xs focus:border-brand focus:outline-none" />
+      )}
+      {typed && (
+        <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-gray-600">
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+          Remember this for next runs (saved on this computer)
+        </label>
+      )}
       {problem}
       {buttons}
     </div>

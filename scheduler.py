@@ -38,6 +38,8 @@ from site_limits import SiteLimits, activities
 log = logging.getLogger(__name__)
 
 GRACE = timedelta(minutes=5)
+MAX_ANSWER = 2000                       # a typed answer is a short value, never a document
+STALE_ANSWER = timedelta(hours=24)      # a yes that has waited this long past its question's deadline is void
 STALE_BATCH = timedelta(hours=12)       # a waiting batch older than this (and not held for a daily allowance) is dropped
 TICK_SECONDS = 15
 RETENTION_DAYS = 30
@@ -67,6 +69,7 @@ class Scheduler:
         self._maintenance = maintenance
         self._resolved = resolved                           # told when a parked run is answered no, expires or is cancelled
         self._maintained_on: Optional[str] = None
+        self._typed: dict[str, dict[str, str]] = {}        # run id -> typed answers. In memory ONLY: never written to disk
         self._warned_cap: set[str] = set()                 # batches already told about a daily limit
 
     # ----------------------------------------------------------------------------- loop
@@ -196,10 +199,20 @@ class Scheduler:
         if pb is None:
             return True
         problems = sch.unattended_problems(pb, s.allow_sensitive)
-        if problems or pbk.approval_hash(pb) != job.pb_hash:
-            why = problems[0] if problems else "The playbook was changed while this waited for you, so what you approved was not run."
+        asked_until = sch.parse_iso(job.expires_at)
+        too_old = asked_until is not None and now - asked_until > STALE_ANSWER      # the situation it was about has moved on
+        if problems or too_old or pbk.approval_hash(pb) != job.pb_hash:
+            why = (problems[0] if problems else
+                   "Your answer (or the time that ran out) was too long ago to act on now, so it was not run." if too_old else
+                   "The playbook was changed while this waited for you, so what you approved was not run.")
             self._set_state(s.id, lambda x: x.model_copy(update={"resume": [j for j in x.resume if j.run_id != job.run_id]}))
             await self._conclude_parked(s, job, "cancelled", why)
+            return True
+        typed = dict(self._typed.get(job.run_id, {}))
+        if any(i not in typed for i in job.typed):            # the app was restarted: what was typed is gone
+            self._set_state(s.id, lambda x: x.model_copy(update={"resume": [j for j in x.resume if j.run_id != job.run_id]}))
+            await self._conclude_parked(s, job, "cancelled",
+                                        "The app was closed before this ran, and typed answers are never saved, so it was not run. Run it again.")
             return True
         acts = activities(pb, job.values)
         decision = self.limits.check(acts, now)
@@ -209,7 +222,9 @@ class Scheduler:
         self._set_state(s.id, lambda x: x.model_copy(update={
             "resume": [j for j in x.resume if j.run_id != job.run_id], "inflight": job.row}))
         try:
-            outcome = await self._execute(pb, dict(job.values), s, job.row, approved=frozenset(job.approved), run_id=job.run_id)
+            outcome = await self._execute(pb, dict(job.values), s, job.row, approved=frozenset(job.approved),
+                                          done=frozenset(job.done), run_id=job.run_id,
+                                          answers=typed, skipped=frozenset(job.skipped))
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -218,8 +233,10 @@ class Scheduler:
         if outcome.status == "busy":                          # never started: put the answer back
             self._set_state(s.id, lambda x: x.model_copy(update={"resume": [job, *x.resume], "inflight": None}))
             return False
+        self._typed.pop(job.run_id, None)                     # parks again below if it needs to, carrying the answers
         return await self._finish_row(s, job.row, outcome, pb, acts, self._now(), values=dict(job.values),
-                                      approved=frozenset(job.approved))
+                                      approved=frozenset(job.approved), answers=typed,
+                                      skipped=frozenset(job.skipped))
 
     async def _try_row(self, s: Schedule, now: datetime) -> bool:
         """Run the next row of this schedule. False if it could not run yet (try another schedule)."""
@@ -279,7 +296,8 @@ class Scheduler:
 
     async def _finish_row(self, s: Schedule, row: int, outcome: Outcome, pb: Optional[pbk.Playbook],
                           acts: Optional[dict], now: datetime, values: Optional[dict] = None,
-                          approved: frozenset = frozenset()) -> bool:
+                          approved: frozenset = frozenset(), answers: Optional[dict] = None,
+                          skipped: frozenset = frozenset()) -> bool:
         if acts is not None:
             self.limits.record(acts, now)
         result = sch.BatchResult(index=row, status=outcome.status, run_id=outcome.run_id, detail=outcome.detail[:300])
@@ -293,7 +311,13 @@ class Scheduler:
                 row=row, run_id=outcome.run_id, step_id=str(w.get("step_id", "")), message=str(w.get("message", ""))[:500],
                 detail=str(w.get("detail", ""))[:600], url=str(w.get("url", ""))[:300], parked_at=sch.iso(now) or "",
                 expires_at=sch.iso(now + timedelta(minutes=int(w.get("timeout_minutes") or pbk.DEFAULT_APPROVAL_MINUTES))) or "",
-                approved=sorted(approved), values=dict(values or {}), pb_hash=pbk.approval_hash(pb))
+                approved=sorted(approved), done=[str(i) for i in w.get("done", [])][:200],
+                values=dict(values or {}), pb_hash=pbk.approval_hash(pb),
+                kind="input" if w.get("kind") == "input" else "approve", variable=str(w.get("variable", ""))[:60],
+                on_timeout="skip" if w.get("on_timeout") == "skip" and w.get("guarded") else "cancel",
+                guarded=str(w.get("guarded", ""))[:60], typed=sorted(answers or {}), skipped=sorted(skipped))
+            if answers:
+                self._typed[outcome.run_id] = dict(answers)
 
         def apply(x: ScheduleState) -> ScheduleState:
             rest = [] if stop else [i for i in x.queue if i != row]
@@ -319,7 +343,7 @@ class Scheduler:
             await self._say("warning", f'Waiting for you: "{s.name}"',
                             f"{parked.message} {parked.detail}".strip() + " Open the inbox or Schedules to answer.",
                             schedule_id=s.id, playbook_id=s.playbook_id, run_id=outcome.run_id,
-                            action={"type": "checkpoint", "schedule_id": s.id, "run_id": outcome.run_id})
+                            action={"type": "checkpoint", "schedule_id": s.id, "run_id": outcome.run_id, "kind": parked.kind})
         if self._batch_finished(updated):
             await self._batch_over(updated, stopped_by_user=outcome.status == "stopped")
         return True
@@ -342,7 +366,10 @@ class Scheduler:
                             f"Row {first.index + 1}: {first.detail or first.status}. The others ran.",
                             schedule_id=s.id, playbook_id=s.playbook_id, run_id=first.run_id)
         elif not bad and len(results) > 1:
-            await self._say("info", f'Finished: "{s.name}"', f"All {len(results)} rows ran.",
+            declined = sum(1 for r in results if r.status == "declined")
+            ran = len(results) - declined
+            await self._say("info", f'Finished: "{s.name}"',
+                            f"All {ran} rows ran." if not declined else f"{ran} ran and you said no to {declined}.",
                             schedule_id=s.id, playbook_id=s.playbook_id)
         if sch.parse_iso(s.state.next_run) is None and s.cadence.kind == "once":
             self._set_state(s.id, lambda x: x.model_copy(update={"next_run": None}))
@@ -351,15 +378,26 @@ class Scheduler:
     def pending(self, s: Schedule) -> list[sch.ParkedRun]:
         return list(s.state.parked)
 
-    async def answer(self, sid: str, run_id: str, approve: bool) -> str:
+    async def answer(self, sid: str, run_id: str, approve: bool, value: Optional[str] = None) -> str:
         """The user's answer to a parked run. Returns "" if taken, else why not. A no ends that run; a yes puts
-        it first in line to run again (it only runs if the playbook is exactly as it was when it was asked)."""
+        it first in line to run again (it only runs if the playbook is exactly as it was when it was asked).
+        A question that asks for a value needs one: a yes without it is not an answer."""
         s = self.schedules.get(sid)
         if s is None:
             return "That schedule no longer exists."
         job = next((p for p in s.state.parked if p.run_id == run_id), None)
         if job is None:
             return "That question was already answered or has run out of time."
+        if approve and job.kind == "input":
+            if not isinstance(value, str) or not value.strip():
+                return "Type the answer first."
+            if len(value) > MAX_ANSWER:
+                return "That answer is too long."
+            self._typed[run_id] = {**self._typed.get(run_id, {}), job.step_id: value.strip()}
+            yes = job.model_copy(update={"typed": sorted({*job.typed, job.step_id})})
+            self._set_state(sid, lambda x: x.model_copy(update={
+                "parked": [p for p in x.parked if p.run_id != run_id], "resume": [*x.resume, yes]}))
+            return ""
         if approve:
             yes = job.model_copy(update={"approved": sorted({*job.approved, job.step_id})})
             self._set_state(sid, lambda x: x.model_copy(update={
@@ -375,6 +413,17 @@ class Scheduler:
             for job in s.state.parked:
                 due = sch.parse_iso(job.expires_at)
                 if due is not None and due <= now:
+                    if job.kind == "approve" and job.on_timeout == "skip" and job.guarded:
+                        # The user chose in advance: no answer means leave that step out and carry on with the rest.
+                        # The question itself counts as answered (not a yes to the step, which is skipped).
+                        go = job.model_copy(update={"approved": sorted({*job.approved, job.step_id}),
+                                                    "skipped": sorted({*job.skipped, job.guarded})})
+                        self._set_state(s.id, lambda x, rid=job.run_id, go=go: x.model_copy(update={
+                            "parked": [p for p in x.parked if p.run_id != rid], "resume": [*x.resume, go]}))
+                        await self._say("info", f'Skipped one step: "{s.name}"',
+                                        f"Nobody answered in time, so this step was left out and the rest carries on (anything typed before it was left as it was): {job.message}",
+                                        schedule_id=s.id, playbook_id=s.playbook_id, run_id=job.run_id)
+                        continue
                     self._set_state(s.id, lambda x, rid=job.run_id: x.model_copy(update={"parked": [p for p in x.parked if p.run_id != rid]}))
                     await self._conclude_parked(s, job, "expired", f"Nobody answered in time, so it was cancelled: {job.message}")
                     await self._say("info", f'Cancelled: "{s.name}"', f"Nobody answered in time, so this was not sent: {job.message}",
@@ -382,6 +431,7 @@ class Scheduler:
 
     async def _conclude_parked(self, s: Schedule, job: "sch.ParkedRun", status: str, detail: str) -> None:
         """A parked run ended without running on (declined, expired, or cancelled): record it everywhere."""
+        self._typed.pop(job.run_id, None)
         result = sch.BatchResult(index=job.row, status=status, run_id=job.run_id, detail=detail[:300])
         try:
             updated = self._set_state(s.id, lambda x: x.model_copy(update={

@@ -151,7 +151,7 @@ class RunHandling(unittest.IsolatedAsyncioTestCase):
         class FakePlayer:
             def __init__(self, driver, approver, notify=None, **k):
                 outer.approver, outer.notify = approver, notify
-            async def run(self, pb, values):
+            async def run(self, pb, values, answers=None):
                 outer.player_args = (pb, values)
                 if isinstance(outer.player_result, BaseException):
                     raise outer.player_result

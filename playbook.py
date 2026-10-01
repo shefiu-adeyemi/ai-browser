@@ -34,17 +34,18 @@ MAX_ATTR_VALUE = 300
 # Step kinds this version can store. A kind in the roadmap that is not here yet (repeat, if,
 # checkpoint, run_playbook) is rejected rather than stored half-understood.
 KINDS = ("open", "search", "back", "click", "type", "select", "key", "scroll", "wait", "tab", "handoff",
-         "approve", "extract", "ai")
+         "approve", "input", "extract", "ai")
 AI_KINDS = ("extract", "ai")           # these need a model; every other kind replays without one
 VAR_TYPES = ("text", "number", "url", "linkedin_url")
 _FIELDS_USED = {                        # which optional fields each kind may carry
     "open": {"url"}, "search": {"query", "engine"}, "back": set(), "click": {"target"},
     "type": {"target", "text"}, "select": {"target", "text"}, "key": {"keys"}, "scroll": {"target"},
-    "wait": {"seconds"}, "tab": {"tab_index"}, "handoff": {"message"}, "approve": {"message", "timeout_minutes"},
-    "extract": {"query"}, "ai": {"query"},
+    "wait": {"seconds"}, "tab": {"tab_index"}, "handoff": {"message"}, "approve": {"message", "timeout_minutes", "on_timeout"},
+    "input": {"message", "variable", "timeout_minutes"},
+    "extract": {"query", "tier"}, "ai": {"query", "tier"},
 }
 _CHECKED_FIELDS = ("url", "target", "text", "keys", "seconds", "query", "engine", "message", "tab_index",
-                   "timeout_minutes")
+                   "timeout_minutes", "variable", "on_timeout", "tier")
 DEFAULT_APPROVAL_MINUTES = 24 * 60
 
 # Search engines a `search` step can use. The address is built here from the engine and the
@@ -109,13 +110,16 @@ class Variable(BaseModel):
     required: bool = True
     allowed_hosts: list[str] = Field(default_factory=list, max_length=20)   # type "url": sites it may point at
     description: str = Field(default="", max_length=300)
+    # A runtime variable is not given when the run starts: a person answers an `input` step DURING the run
+    # (text or a number only; a web address typed mid-run could send a run anywhere).
+    runtime: bool = False
 
 
 class Step(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     kind: Literal["open", "search", "back", "click", "type", "select", "key", "scroll", "wait", "tab",
-                  "handoff", "approve", "extract", "ai"]
+                  "handoff", "approve", "input", "extract", "ai"]
     tag: Literal["deterministic", "ai"] = "deterministic"
     note: str = Field(default="", max_length=300)           # plain words: what this step does
     url: Optional[str] = None
@@ -135,6 +139,13 @@ class Step(BaseModel):
     # approve step: how long to wait for the user's answer when nobody is there (default one day). No answer
     # in time means NO: the run is cancelled, never carried on.
     timeout_minutes: Optional[int] = Field(default=None, ge=5, le=7 * 24 * 60)
+    # approve step: what happens when nobody answers in time. "cancel" (the default) ends the run; "skip" leaves
+    # out the step the question was about and carries on with the rest. Never "go ahead": silence is never a yes.
+    on_timeout: Optional[Literal["cancel", "skip"]] = None
+    variable: Optional[str] = Field(default=None, max_length=40)       # input step: the runtime variable it fills
+    # extract / ai step: which model TIER reads the page (a tier, never a model name, so the models behind the
+    # tiers can be swapped in Settings at any time). None = automatic, the router's own choice for the job.
+    tier: Optional[Literal["fast", "standard", "strong"]] = None
     ask: bool = False        # reaches other people or can't be undone: needs the user's approval
     check: Optional[Check] = None
 
@@ -291,6 +302,7 @@ def validate(pb: Playbook) -> list[str]:
                 "type": ("target", s.target), "select": ("target", s.target), "key": ("keys", s.keys),
                 "wait": ("seconds", s.seconds), "tab": ("tab_index", s.tab_index),
                 "handoff": ("message", s.message), "approve": ("message", s.message),
+                "input": ("variable", s.variable),
                 "extract": ("query", s.query), "ai": ("query", s.query)}
         if s.kind in need and need[s.kind][1] is None:
             problems.append(f"{where}: a {s.kind} step needs '{need[s.kind][0]}'")
@@ -298,10 +310,10 @@ def validate(pb: Playbook) -> list[str]:
             problems.append(f"{where}: a search step needs an 'engine'")
         if s.kind == "search" and not (s.query or "").strip():
             problems.append(f"{where}: a search step needs something to search for")
-        if s.kind in ("handoff", "approve") and not (s.message or "").strip():
+        if s.kind in ("handoff", "approve", "input") and not (s.message or "").strip():
             problems.append(f"{where}: a {s.kind} step needs a message for the user")
-        if s.kind == "approve" and n == len(pb.steps):
-            problems.append(f"{where}: an approve step must come BEFORE the step it guards, so it can't be last")
+        if s.kind in ("approve", "input") and n == len(pb.steps):
+            problems.append(f"{where}: a {s.kind} step must come BEFORE the step it is about, so it can't be last")
         if s.kind in ("type", "select") and s.text is None:
             problems.append(f"{where}: a {s.kind} step needs 'text'")
 
@@ -321,9 +333,50 @@ def validate(pb: Playbook) -> list[str]:
         problems += _check_placeholders(f"{where} keys", s.keys, variables, allow_secret=False)
         problems += _check_placeholders(f"{where} query", s.query, variables, allow_secret=False)
         # A handoff message is shown as written; an approve message may use the run's inputs ("Send to {{name}}?")
-        problems += _check_placeholders(f"{where} message", s.message, variables if s.kind == "approve" else {},
+        problems += _check_placeholders(f"{where} message", s.message,
+                                        {k: v for k, v in variables.items() if not v.runtime} if s.kind in ("approve", "input") else {},
                                         allow_secret=False)
+    problems += _runtime_problems(pb, variables)
+    for n, s in enumerate(pb.steps):
+        if s.kind == "approve" and s.on_timeout == "skip" and not (n + 1 < len(pb.steps) and pb.steps[n + 1].ask):
+            problems.append(f"step {s.id}: 'skip and carry on' only works when the very next step is one that needs approval "
+                            "(a send, a post); anything else would leave the run half-done")
     return problems
+
+
+def runtime_variables(pb: Playbook) -> list[Variable]:
+    return [v for v in pb.variables if v.runtime]
+
+
+def _runtime_problems(pb: Playbook, variables: dict[str, Variable]) -> list[str]:
+    """Rules for values a person types DURING a run: each has exactly one input step that fills it, and no
+    step uses it before that step has asked."""
+    out: list[str] = []
+    asked_at: dict[str, int] = {}
+    for n, s in enumerate(pb.steps):
+        if s.kind == "input" and s.variable is not None:
+            v = variables.get(s.variable)
+            if v is None:
+                out.append(f"step {s.id}: asks for '{s.variable}', which is not a variable")
+            elif not v.runtime:
+                out.append(f"step {s.id}: '{s.variable}' is given when the run starts, so it can't also be asked for during it")
+            elif s.variable in asked_at:
+                out.append(f"step {s.id}: '{s.variable}' is asked for twice")
+            else:
+                asked_at[s.variable] = n
+    for v in variables.values():
+        if v.runtime:
+            if v.type not in ("text", "number"):
+                out.append(f"variable '{v.name}': a value typed during a run can only be text or a number")
+            if v.name not in asked_at and not any(s.kind == "input" and s.variable == v.name for s in pb.steps):
+                out.append(f"variable '{v.name}' is asked during the run, but no step asks for it")
+    for n, s in enumerate(pb.steps):
+        for field in ("url", "text", "keys", "query", "message"):
+            value = getattr(s, field, None)
+            for name in PLACEHOLDER_RE.findall(value or ""):
+                if name in asked_at and n <= asked_at[name]:
+                    out.append(f"step {s.id}: uses '{name}' before the step that asks for it")
+    return out
 
 
 # ------------------------------------------------------------------------------ domains
@@ -353,10 +406,11 @@ def compute_domains(pb: Playbook) -> list[str]:
 # ------------------------------------------------------------------------------ approval
 def approval_hash(pb: Playbook) -> str:
     """Fingerprint of everything a user approves: the steps, what the variables may be, the sites.
-    Notes and names are cosmetic and excluded, so renaming does not cost the approval."""
+    Notes and names are cosmetic and excluded, so renaming does not cost the approval. So is the model tier of a
+    step: it changes what a run costs, not what it does or may reach (the guard is the same on every tier)."""
     body = {
-        "steps": [s.model_dump(mode="json", exclude={"note"}) for s in pb.steps],
-        "variables": [{"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts)}
+        "steps": [s.model_dump(mode="json", exclude={"note", "tier"}) for s in pb.steps],
+        "variables": [{"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts), "runtime": v.runtime}
                       for v in pb.variables],
         "domains": compute_domains(pb),
     }
@@ -425,7 +479,11 @@ def bind_values(pb: Playbook, supplied: dict) -> tuple[dict[str, str], list[str]
     known = {v.name for v in pb.variables}
     for extra in sorted(set(supplied) - known):
         errors.append(f"'{extra}' is not a variable of this playbook")
+    for name in sorted(set(supplied) & {v.name for v in pb.variables if v.runtime}):
+        errors.append(f"'{name}' is answered while the run is going, not before it")
     for v in pb.variables:
+        if v.runtime:
+            continue
         raw = supplied.get(v.name)
         if raw is None or (isinstance(raw, str) and raw == ""):
             raw = v.default

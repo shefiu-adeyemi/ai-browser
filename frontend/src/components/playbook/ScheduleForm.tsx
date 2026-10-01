@@ -87,8 +87,9 @@ export default function ScheduleForm({ existing, onCancel, onSaved }: Props) {
   if (!playbooks) return <p className="p-8 text-center text-xs text-gray-400">Opening…</p>
 
   const chosen = playbooks.find((p) => p.id === playbookId)
-  const variables = pb?.variables ?? []
-  const askCount = pb ? pb.steps.filter((s) => s.ask).length : 0
+  const variables = (pb?.variables ?? []).filter((v) => !v.runtime)       // typed in when asked, never up front
+  const askCount = pb ? pb.steps.filter((s, i) => s.ask && !(i > 0 && pb.steps[i - 1].kind === 'approve')).length : 0
+  const guardedCount = pb ? pb.steps.filter((s, i) => s.ask && i > 0 && pb.steps[i - 1].kind === 'approve').length : 0
   const handoffs = pb ? pb.steps.filter((s) => s.kind === 'handoff').length : 0
 
   const setCell = (i: number, key: string, value: string) =>
@@ -240,10 +241,16 @@ export default function ScheduleForm({ existing, onCancel, onSaved }: Props) {
           </label>
         </fieldset>
 
+        {guardedCount > 0 && (
+          <p className="rounded-lg bg-green-50 px-3 py-2 text-xs text-green-800">
+            {guardedCount === 1 ? 'A step that sends something asks' : `${guardedCount} steps that send something ask`} you first, every time.
+            It waits for your answer in the inbox, and no answer cancels it.
+          </p>
+        )}
         {askCount > 0 && (
           <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
             <input type="checkbox" checked={allowSensitive} onChange={(e) => setAllowSensitive(e.target.checked)} className="mt-0.5" />
-            <span><span className="font-medium">Let these steps run while I'm away.</span> {askCount} step{askCount === 1 ? '' : 's'} send something, post, or can't be undone.</span>
+            <span><span className="font-medium">Let these steps run while I'm away.</span> {askCount} step{askCount === 1 ? '' : 's'} send something, post, or can't be undone. (Or open the playbook and tick "Ask me each time" on {askCount === 1 ? 'it' : 'them'}.)</span>
           </label>
         )}
 

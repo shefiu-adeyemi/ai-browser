@@ -29,6 +29,7 @@ class TaskController:
         self.paused = False
         self.origin_task = ""          # what the USER asked; never a "continue ..." wrapper
         self.fmt = "auto"
+        self.tier: Optional[str] = None     # the model tier the user chose for this task (None = automatic)
         self._task: Optional[asyncio.Task] = None
         self._stop_timeout = stop_timeout
         self._stop_requested = False
@@ -47,14 +48,14 @@ class TaskController:
         return self._stop_requested
 
     # ------------------------------------------------------------------- start
-    def start(self, run: Callable[[], Awaitable[None]], *, origin: str, fmt: str) -> None:
+    def start(self, run: Callable[[], Awaitable[None]], *, origin: str, fmt: str, tier: Optional[str] = None) -> None:
         """Claim the slot and launch `run()`. The claim happens NOW, before the task is
         scheduled, so two calls in a row cannot both succeed."""
         if self.running:
             raise Busy("agent already running")
         if self.paused:
             raise Busy("task paused — use Continue or Stop first")
-        self.running, self.origin_task, self.fmt = True, origin, fmt
+        self.running, self.origin_task, self.fmt, self.tier = True, origin, fmt, tier
         self._launch(run)
 
     def resume(self, run: Callable[[], Awaitable[None]]) -> None:

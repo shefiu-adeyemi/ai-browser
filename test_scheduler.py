@@ -553,8 +553,8 @@ class Quiet(Harness):
         self.assertEqual(len(self.calls), 1)
 
 
-class Checkpoints(Harness):
-    """A run parked at an approve step, and what the user's answer (or silence) does."""
+class CheckpointBase(Harness):
+    """The playbook, the parked-run scripts and the helpers the checkpoint tests share."""
     def setUp(self):
         self.resolved: list[tuple] = []
 
@@ -581,6 +581,9 @@ class Checkpoints(Harness):
         await self.sched.tick()
         return s
 
+
+class Checkpoints(CheckpointBase):
+    """A run parked at an approve step, and what the user's answer (or silence) does."""
     # ---------------------------------------------------------------------------- parking
     async def test_a_run_that_reaches_an_approve_step_is_parked_not_failed(self):
         s = await self.park()
@@ -601,7 +604,7 @@ class Checkpoints(Harness):
         self.assertEqual((n["level"], n["title"]), ("warning", 'Waiting for you: "Daily"'))
         self.assertIn("Send to Jane?", n["text"])
         self.assertIn("Hello Jane", n["text"])
-        self.assertEqual(n["action"], {"type": "checkpoint", "schedule_id": s.id, "run_id": "run_" + "a" * 12})
+        self.assertEqual(n["action"], {"type": "checkpoint", "schedule_id": s.id, "run_id": "run_" + "a" * 12, "kind": "approve"})
 
     async def test_a_wait_the_playbook_asked_for_is_used(self):
         self.script = [self.waiting(timeout=90)]
@@ -633,11 +636,23 @@ class Checkpoints(Harness):
         self.now += timedelta(seconds=120)
         await self.sched.tick()
         self.assertEqual(len(self.calls), 2)
-        self.assertEqual(self.extras[-1], {"approved": frozenset({"s2"}), "run_id": "run_" + "a" * 12})
+        self.assertEqual(self.extras[-1], {"approved": frozenset({"s2"}), "done": frozenset(), "answers": {}, "skipped": frozenset(), "run_id": "run_" + "a" * 12})
         self.assertEqual(self.calls[-1][1], {"p": PROFILE.format("p0")})                   # the SAME inputs it was asked about
         got = self.get(s)
         self.assertEqual((got.state.resume, got.state.parked, got.state.last_status), ([], [], "done"))
         self.assertEqual([r.status for r in got.state.batch_results], ["done"])            # replaced, not added to
+
+    async def test_what_already_ran_is_handed_back_so_it_is_not_repeated(self):
+        self.script = [Outcome("waiting", run_id="run_" + "a" * 12, detail="w", waiting={
+            "message": "Send?", "detail": "", "url": "", "step_id": "s2", "index": 1, "timeout_minutes": 60, "done": ["s1", "s0"]})]
+        s = self.make()
+        await self.sched.tick()
+        (job,) = self.get(s).state.parked
+        self.assertEqual(job.done, ["s1", "s0"])
+        await self.sched.answer(s.id, job.run_id, True)
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(self.extras[-1]["done"], frozenset({"s1", "s0"}))
 
     async def test_a_resume_counts_as_another_visit(self):
         s = await self.park()
@@ -760,6 +775,22 @@ class Checkpoints(Harness):
         self.assertIn("changed while this waited", self.resolved[0][2])
         self.assertEqual(self.get(s).state.resume, [])
 
+    async def test_a_yes_that_waited_far_too_long_is_void(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.now += timedelta(hours=24 + 25)                         # past the question's deadline and the extra day
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.resolved[0][1], "cancelled")
+        self.assertIn("too long ago", self.resolved[0][2])
+
+    async def test_a_yes_within_the_extra_day_still_runs(self):
+        s = await self.park()
+        await self.sched.answer(s.id, "run_" + "a" * 12, True)
+        self.now += timedelta(hours=24 + 12)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 2)
+
     async def test_if_the_approval_was_taken_back_the_yes_is_void(self):
         s = await self.park()
         await self.sched.answer(s.id, "run_" + "a" * 12, True)
@@ -824,6 +855,15 @@ class Checkpoints(Harness):
         self.assertEqual(len(self.calls), 1)
 
     # --------------------------------------------------------------------------- the summary
+    async def test_a_skip_choice_does_not_report_a_batch_as_troubled_while_a_question_is_open(self):
+        self.script = [self.waiting(), Outcome("done")]
+        s = self.make(rows=2, on_failure="skip")
+        await self.ticks(5, step=timedelta(seconds=120))
+        self.assertEqual([n["title"] for n in self.notes], ['Waiting for you: "Daily"'])      # no "1 of 2 need you" yet
+        await self.sched.answer(s.id, "run_" + "a" * 12, False)
+        self.assertEqual([n["title"] for n in self.notes], ['Waiting for you: "Daily"', 'Finished: "Daily"'])   # a no is not a problem
+        self.assertEqual(self.notes[-1]["text"], "1 ran and you said no to 1.")
+
     async def test_the_batch_summary_comes_once_the_last_question_is_settled(self):
         self.script = [self.waiting(), Outcome("done")]
         s = self.make(rows=2)
@@ -832,6 +872,144 @@ class Checkpoints(Harness):
         await self.sched.answer(s.id, "run_" + "a" * 12, True)
         await self.ticks(3, step=timedelta(seconds=120))
         self.assertEqual([n["title"] for n in self.notes], ['Waiting for you: "Daily"', 'Finished: "Daily"'])
+
+
+class InputQuestions(CheckpointBase):
+    """A parked run that needs a typed value, and an approve step the user said may be skipped."""
+    RID = "run_" + "a" * 12
+
+    def asks(self, **kw):
+        w = {"kind": "input", "message": "What is the code?", "detail": "", "url": "https://www.linkedin.com/in/jane",
+             "variable": "code", "step_id": "s2", "index": 1, "timeout_minutes": 60, "on_timeout": "cancel", "guarded": "", "done": []}
+        w.update(kw)
+        return Outcome("waiting", run_id=self.RID, detail="waiting", waiting=w)
+
+    async def park_input(self, **kw):
+        self.script = [self.asks(**kw)]
+        s = self.make()
+        await self.sched.tick()
+        return s
+
+    async def test_an_input_question_is_parked_as_one(self):
+        s = await self.park_input()
+        (job,) = self.get(s).state.parked
+        self.assertEqual((job.kind, job.variable, job.step_id), ("input", "code", "s2"))
+        self.assertEqual(self.notes[0]["action"]["kind"], "input")
+
+    async def test_a_yes_without_a_value_is_not_an_answer(self):
+        s = await self.park_input()
+        for bad in (None, "", "   ", 5):
+            self.assertEqual(await self.sched.answer(s.id, self.RID, True, bad), "Type the answer first.")
+        self.assertEqual(len(self.get(s).state.parked), 1)
+
+    async def test_a_huge_answer_is_refused(self):
+        s = await self.park_input()
+        self.assertIn("too long", await self.sched.answer(s.id, self.RID, True, "x" * 5000))
+        self.assertEqual(len(self.get(s).state.parked), 1)
+
+    async def test_the_value_is_handed_to_the_run_when_it_starts_again(self):
+        s = await self.park_input()
+        self.assertEqual(await self.sched.answer(s.id, self.RID, True, " 123456 "), "")
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(self.extras[-1]["answers"], {"s2": "123456"})
+        self.assertEqual(self.extras[-1]["approved"], frozenset())                         # typing a value approves nothing
+        self.assertEqual(self.get(s).state.last_status, "done")
+
+    async def test_a_typed_answer_is_never_written_to_the_schedule_file(self):
+        s = await self.park_input()
+        await self.sched.answer(s.id, self.RID, True, "s3cret-code")
+        self.assertNotIn("s3cret-code", self.scheds.path.read_text(encoding="utf-8"))
+        self.assertEqual(self.get(s).state.resume[0].typed, ["s2"])
+
+    async def test_if_the_app_was_closed_the_typed_answer_is_gone_and_the_run_is_cancelled_not_run(self):
+        s = await self.park_input()
+        await self.sched.answer(s.id, self.RID, True, "123456")
+        self.sched._typed.clear()                                                          # as after a restart
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.resolved[-1][1], "cancelled")
+        self.assertIn("never saved", self.resolved[-1][2])
+
+    async def test_what_was_typed_is_forgotten_when_the_run_ends(self):
+        s = await self.park_input()
+        await self.sched.answer(s.id, self.RID, True, "123456")
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(self.sched._typed, {})
+
+    async def test_a_no_to_a_question_for_a_value_ends_the_run(self):
+        s = await self.park_input()
+        self.assertEqual(await self.sched.answer(s.id, self.RID, False), "")
+        self.assertEqual(self.resolved[0][1], "declined")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_silence_cancels_a_question_for_a_value(self):
+        s = await self.park_input()
+        self.now += timedelta(hours=2)
+        await self.sched.tick()
+        self.assertEqual(self.resolved[0][1], "expired")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_a_later_question_keeps_the_earlier_typed_answer(self):
+        s = await self.park_input()
+        await self.sched.answer(s.id, self.RID, True, "123456")
+        self.script = [Outcome("waiting", run_id=self.RID, detail="w", waiting={
+            "kind": "approve", "message": "Send?", "detail": "", "url": "", "step_id": "s4", "index": 3, "timeout_minutes": 60,
+            "on_timeout": "cancel", "guarded": "s5", "done": []})]
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        (job,) = self.get(s).state.parked
+        self.assertEqual((job.kind, job.typed), ("approve", ["s2"]))
+        self.assertEqual(self.sched._typed[self.RID], {"s2": "123456"})
+        self.assertNotIn("123456", self.scheds.path.read_text(encoding="utf-8"))          # the value is never on disk
+
+    # ------------------------------------------------------------------------ skip when unanswered
+    async def park_skippable(self, on_timeout="skip", guarded="s3"):
+        self.script = [self.waiting()]
+        self.script[0].waiting.update(on_timeout=on_timeout, guarded=guarded)
+        s = self.make()
+        await self.sched.tick()
+        return s
+
+    async def test_silence_on_a_skippable_step_leaves_it_out_and_carries_on(self):
+        s = await self.park_skippable()
+        self.now += timedelta(hours=25)
+        await self.sched.tick()
+        got = self.get(s)
+        self.assertEqual(got.state.parked, [])
+        self.assertEqual(self.notes[1]["title"], 'Skipped one step: "Daily"')
+        self.now += timedelta(seconds=120)
+        await self.sched.tick()
+        self.assertEqual(self.extras[-1]["skipped"], frozenset({"s3"}))
+        self.assertEqual(self.extras[-1]["approved"], frozenset({"s2"}))                   # the step itself is NOT approved
+        self.assertEqual(self.get(s).state.last_status, "done")
+
+    async def test_a_plain_cancel_stays_a_cancel(self):
+        s = await self.park_skippable(on_timeout="cancel")
+        self.now += timedelta(hours=25)
+        await self.sched.tick()
+        self.assertEqual(self.resolved[0][1], "expired")
+        self.assertEqual(self.get(s).state.resume, [])
+
+    async def test_skip_needs_a_step_to_skip(self):
+        s = await self.park_skippable(guarded="")
+        (job,) = self.get(s).state.parked
+        self.assertEqual(job.on_timeout, "cancel")
+
+    async def test_a_no_is_still_a_no_even_when_silence_would_skip(self):
+        s = await self.park_skippable()
+        await self.sched.answer(s.id, self.RID, False)
+        self.assertEqual(self.resolved[0][1], "declined")
+        self.assertEqual(self.get(s).state.resume, [])
+
+    async def test_a_skipped_run_that_is_too_stale_is_not_run(self):
+        s = await self.park_skippable()
+        self.now += timedelta(hours=60)
+        await self.sched.tick()
+        await self.sched.tick()
+        self.assertEqual(len(self.calls), 1)
 
 
 class Loop(Harness):

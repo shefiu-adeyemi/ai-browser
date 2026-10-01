@@ -6,6 +6,8 @@ import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/comp
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
 import CopyButton from '@/components/CopyButton'
+import ModelTiers from '@/components/ModelTiers'
+import TierPicker, { type TierChoice } from '@/components/TierPicker'
 import { cn, formatDuration, formatDate, plural } from '@/lib/utils'
 import {
   Plus, Settings, ChevronDown, Square, Trash2, ChevronRight,
@@ -33,7 +35,7 @@ interface ChatPanelProps {
   onOpenPlaybooks: () => void
   onOpenInbox: () => void
   unread: number
-  onSendTask: (task: string, fmt: FormatOption) => void
+  onSendTask: (task: string, fmt: FormatOption, tier: TierChoice) => void
   onStop: () => void
   onContinue: (extraSteps: number) => void
   onRetry: () => void
@@ -464,6 +466,7 @@ async function saveSettings(s: SettingsType): Promise<SaveResult> {
   const body: Partial<SettingsType> = { ...s }
   delete body.UNREADABLE
   delete body.PROVIDERS   // the provider table only flows server -> UI
+  delete body.TIERS
   try {
     const res = await fetch('/settings', {
       method: 'POST',
@@ -481,6 +484,11 @@ async function saveSettings(s: SettingsType): Promise<SaveResult> {
 const SETTING_NAMES: Record<string, string> = {
   LLM_PROVIDER: 'Provider',
   LLM_MODEL: 'Model',
+  LLM_FAST_PROVIDER: 'Fast model provider',
+  LLM_FAST_MODEL: 'Fast model',
+  LLM_STRONG_PROVIDER: 'Strong model provider',
+  LLM_STRONG_MODEL: 'Strong model',
+  LLM_ROUTER: 'Router',
   ANTHROPIC_API_KEY: 'Anthropic API key',
   OPENAI_API_KEY: 'OpenAI API key',
   GEMINI_API_KEY: 'Gemini API key',
@@ -738,6 +746,8 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
             </FieldRow>
           )
         })()}
+
+        <ModelTiers settings={settings} update={update} />
 
         <SectionLabel>LinkedIn</SectionLabel>
         <FieldRow label="Email">
@@ -1152,7 +1162,7 @@ function InputCard({
   onOpenSettings,
 }: {
   status: Status
-  onSend: (task: string, fmt: FormatOption) => void
+  onSend: (task: string, fmt: FormatOption, tier: TierChoice) => void
   onStop: () => void
   hasMessages: boolean
   prefill: string
@@ -1165,6 +1175,16 @@ function InputCard({
     try { return localStorage.getItem(DRAFT_KEY) ?? '' } catch { return '' }
   })
   const [fmt, setFmt] = useState<FormatOption>('auto')
+  const [tier, setTierState] = useState<TierChoice>(() => {
+    try {
+      const saved = localStorage.getItem('agent_tier')
+      return saved === 'fast' || saved === 'standard' || saved === 'strong' ? saved : 'auto'
+    } catch { return 'auto' }
+  })
+  const setTier = (t: TierChoice) => {
+    setTierState(t)
+    try { localStorage.setItem('agent_tier', t) } catch {}
+  }
   const [focused, setFocused] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -1194,8 +1214,8 @@ function InputCard({
     const task = value.trim()
     if (!task || status === 'running' || status === 'paused') return
     setValuePersisted('')
-    onSend(task, fmt)
-  }, [value, status, onSend, fmt, setValuePersisted])
+    onSend(task, fmt, tier)
+  }, [value, status, onSend, fmt, tier, setValuePersisted])
 
   const handleKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1234,6 +1254,7 @@ function InputCard({
 
         <div className="flex items-center gap-2 px-3.5 pb-3 pt-1">
           <ModelPicker disabled={running} refreshKey={settingsVersion} onOpenSettings={onOpenSettings} />
+          <TierPicker value={tier} onChange={setTier} disabled={running} refreshKey={settingsVersion} />
           <FormatDropdown value={fmt} onChange={setFmt} />
           <div className="flex-1" />
           {running ? (

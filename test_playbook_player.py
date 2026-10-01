@@ -1,5 +1,6 @@
 """Tests for playbook_player.py with a fake page (no browser)."""
 
+from approvals import Typed
 import asyncio
 import unittest
 from types import SimpleNamespace as NS
@@ -22,7 +23,18 @@ class Inner:
     def __init__(self, answer=True, clock=None, thinks=0.0):
         self.answer, self.asked, self.clock, self.thinks = answer, [], clock, thinks
         self.details: list[str] = []
+        self.text = "654321"                                # what the user types when asked for a value
+        self.texts: list[str] = []
+        self.remember = False                               # did the user tick "remember this for next runs"
         self.then = None                                    # what the user does in the browser before answering
+    async def ask_text(self, title, detail="", url=""):
+        self.texts.append(title)
+        if self.text is None:
+            return None
+        typed = Typed(self.text)
+        typed.remember = self.remember
+        return typed
+
     async def ask(self, kind, title, detail="", url=""):
         self.asked.append((kind, title))
         self.details.append(detail)
@@ -528,7 +540,7 @@ class Checkpoints(PlayerCase):
         page = self.page()
         r = await self.run_pb(self.send_pb(), {"who": "Jane"})
         self.assertEqual(r.status, "needs_you")
-        self.assertIn("You said no: Send to Jane?", r.error)
+        self.assertIn("Not approved (you said no, or nobody answered in time): Send to Jane?", r.error)
         self.assertNotIn(("click", {"index": 4}), page.actions)
 
     async def test_it_works_for_a_playbook_that_was_never_approved(self):
@@ -570,8 +582,10 @@ class Checkpoints(PlayerCase):
         r = await self.run_pb(self.send_pb(), {"who": "Jane"})
         self.assertEqual(r.status, "waiting")
         self.assertEqual(self.inner.asked, [])                                        # never asks anyone
-        self.assertEqual(r.waiting, {"message": "Send to Jane?", "detail": 'Typed just before: "Hello Jane"',
-                                     "url": "https://a.com/", "timeout_minutes": 1440, "step_id": "s3", "index": 2})
+        self.assertEqual(r.waiting, {"kind": "approve", "on_timeout": "cancel", "guarded": "s4",
+                                     "message": "Send to Jane?", "detail": 'Typed just before: "Hello Jane"',
+                                     "url": "https://a.com/", "timeout_minutes": 1440, "step_id": "s3", "index": 2,
+                                     "done": []})
         self.assertEqual(r.screenshot, self.JPEG)
         self.assertNotIn(("click", {"index": 4}), page.actions)                       # nothing was sent
         self.assertEqual(len(r.steps), 3)
@@ -594,6 +608,74 @@ class Checkpoints(PlayerCase):
         self.assertEqual(page.actions[-1], ("click", {"index": 4}))
         self.assertEqual(self.inner.asked, [])
         self.assertEqual([s.approval for s in r2.steps], [None, None, "asked", "preapproved"])
+
+    # ------------------------------------------------- starting again must not repeat what was already done
+    def two_sends(self):
+        return make_pb([S(1, "open", url="https://a.com/"),
+                        S(2, "click", target=fp("Connect", h=5, sh=6), ask=True),        # allowed by the playbook's own approval
+                        S(3, "approve", message="Send the message?"),
+                        S(4, "click", target=fp("Send", h=7, sh=8), ask=True)], approve=True)
+
+    def two_sends_page(self):
+        page = self.build([el(2, "Connect", h=5, sh=6), el(4, "Send", h=7, sh=8)], attended=False)
+        page.risky[2], page.risky[4] = "Connect?", "Send?"
+        return page
+
+    async def test_a_risky_step_that_already_ran_is_remembered_when_the_run_parks(self):
+        page = self.two_sends_page()
+        r = await self.run_pb(self.two_sends())
+        self.assertEqual(r.status, "waiting")
+        self.assertEqual(r.waiting["done"], ["s2"])
+        self.assertEqual([a for a in page.actions if a[0] == "click"], [("click", {"index": 2})])
+
+    async def test_on_the_resume_that_step_is_skipped_not_repeated_and_the_rest_carries_on(self):
+        page = self.two_sends_page()
+        pb = self.two_sends()
+        first = await self.run_pb(pb)
+        page.actions.clear()
+        r = await self.player.run(pb, approved={"s3"}, done=set(first.waiting["done"]))
+        self.assertEqual(r.status, "done", r.error)
+        clicks = [a for a in page.actions if a[0] == "click"]
+        self.assertEqual(clicks, [("click", {"index": 4})])                               # Connect was NOT clicked again
+        self.assertIn("not repeated", r.steps[1].detail)
+        self.assertEqual([a[0] for a in page.actions][:1], ["navigate"])                  # harmless steps simply run again
+
+    async def test_a_second_park_keeps_the_record_of_what_ran_before(self):
+        page = self.two_sends_page()
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Connect", h=5, sh=6), ask=True),
+                      S(3, "approve", message="First?"), S(4, "click", target=fp("Send", h=7, sh=8), ask=True),
+                      S(5, "approve", message="Second?"), S(6, "wait", seconds=1)], approve=True)
+        r1 = await self.run_pb(pb)
+        self.assertEqual((r1.waiting["step_id"], r1.waiting["done"]), ("s3", ["s2"]))
+        r2 = await self.player.run(pb, approved={"s3"}, done=set(r1.waiting["done"]))
+        self.assertEqual((r2.waiting["step_id"], r2.waiting["done"]), ("s5", ["s2", "s4"]))
+        page.actions.clear()
+        r3 = await self.player.run(pb, approved={"s3", "s5"}, done=set(r2.waiting["done"]))
+        self.assertEqual(r3.status, "done", r3.error)
+        self.assertEqual([a for a in page.actions if a[0] == "click"], [])                # nothing risky repeated
+
+    async def test_only_the_steps_named_are_skipped(self):
+        page = self.two_sends_page()
+        r = await self.player.run(self.two_sends(), approved={"s3"}, done={"s99"})
+        self.assertEqual([a for a in page.actions if a[0] == "click"], [("click", {"index": 2}), ("click", {"index": 4})])
+
+    async def test_a_risky_step_that_failed_is_not_marked_done(self):
+        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Missing", h=1), ask=True),
+                      S(3, "approve", message="x"), S(4, "wait", seconds=1)], approve=True)
+        r = await self.run_pb(pb)
+        self.assertEqual(r.status, "failed")                                              # it never reached the checkpoint
+        self.assertIsNone(r.waiting)
+
+    async def test_an_earlier_yes_grants_the_next_step_even_without_the_playbooks_own_approval(self):
+        # attended, playbook never approved: the yes given to the checkpoint is what lets the send through
+        page = self.page(attended=True)
+        r = await self.player.run(self.send_pb(approve=False), {"who": "Jane"}, approved={"s3"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.asked, [])                                        # no second question
+        self.assertEqual([s.approval for s in r.steps], [None, None, "asked", "preapproved"])
+        r2 = await self.player.run(self.send_pb(approve=False), {"who": "Jane"})      # without the answer it WOULD ask
+        self.assertEqual(self.inner.asked[0][0], "approve")
 
     async def test_a_yes_to_the_wrong_checkpoint_changes_nothing(self):
         self.page(attended=False)
@@ -651,6 +733,184 @@ class Checkpoints(PlayerCase):
         pb = make_pb([S(1, "approve", message="Go?"), S(2, "wait", seconds=1)])
         r = await self.player.run(pb, approved={"s1"})
         self.assertEqual(r.status, "done")
+
+
+class InputsDuringTheRun(PlayerCase):
+    JPEG = b"\xff\xd8\xff-picture"
+
+    def code_pb(self, vtype="text", approve=True):
+        return make_pb([S(1, "open", url="https://a.com/form"),
+                        S(2, "input", message="What is the code for {{who}}?", variable="code", timeout_minutes=30),
+                        S(3, "type", target=fp("Code", "input", h=1, sh=2), text="{{code}}"),
+                        S(4, "wait", seconds=1)],
+                       variables=[Variable(name="who"), Variable(name="code", type=vtype, runtime=True)], approve=approve)
+
+    def form_page(self, **kw):
+        page = self.build([el(1, "Code", "input", h=1, sh=2)], **kw)
+        async def shot(): return self.JPEG
+        page.screenshot = shot
+        return page
+
+    async def test_the_user_types_a_value_and_the_rest_of_the_run_uses_it(self):
+        page = self.form_page()
+        r = await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(self.inner.texts, ["What is the code for Jane?"])
+        self.assertEqual(page.actions[1], ("input", {"index": 1, "text": "654321", "clear": True}))
+        self.assertEqual(r.steps[1].approval, "asked")
+
+    async def test_a_remembered_answer_is_handed_over_to_be_kept(self):
+        kept = []
+        self.form_page()
+        self.player._remember = lambda name, value: kept.append((name, value))
+        self.inner.remember = True
+        r = await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(kept, [("code", "654321")])
+
+    async def test_an_answer_is_not_kept_unless_the_user_asked(self):
+        kept = []
+        self.form_page()
+        self.player._remember = lambda name, value: kept.append((name, value))
+        await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.assertEqual(kept, [])
+
+    async def test_a_number_answer_is_still_kept_when_asked(self):
+        kept = []
+        self.form_page()
+        self.player._remember = lambda name, value: kept.append((name, value))
+        self.inner.remember, self.inner.text = True, " 42 "
+        await self.run_pb(self.code_pb("number"), {"who": "Jane"})
+        self.assertEqual(len(kept), 1)
+
+    async def test_failing_to_keep_it_does_not_fail_the_run(self):
+        self.form_page()
+        def boom(name, value): raise OSError("disk full")
+        self.player._remember = boom
+        self.inner.remember = True
+        self.assertEqual((await self.run_pb(self.code_pb(), {"who": "Jane"})).status, "done")
+
+    async def test_an_answer_that_was_kept_is_used_without_asking(self):
+        self.form_page()
+        r = await self.player.run(self.code_pb(), {"who": "Jane"}, answers={"s2": "kept-value"})
+        self.assertEqual((r.status, self.inner.texts), ("done", []))
+
+    async def test_the_typed_value_is_never_written_to_the_report(self):
+        self.form_page()
+        r = await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.assertNotIn("654321", str(r.to_dict()))
+        self.assertNotIn("654321", " ".join(self.msgs))
+
+    async def test_no_answer_stops_the_run(self):
+        self.inner.text = None
+        page = self.form_page()
+        r = await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "needs_you")
+        self.assertIn("No answer was given", r.error)
+        self.assertEqual(len(page.actions), 1)
+
+    async def test_a_number_is_checked(self):
+        self.inner.text = "twelve"
+        self.form_page()
+        r = await self.run_pb(self.code_pb("number"), {"who": "Jane"})
+        self.assertEqual(r.status, "failed")
+        self.assertIn("That answer must be a number", r.error)
+        self.inner.text = " 42 "
+        self.form_page()
+        self.assertEqual((await self.run_pb(self.code_pb("number"), {"who": "Jane"})).status, "done")
+
+    async def test_a_secret_placeholder_cannot_be_typed_in_as_the_answer(self):
+        self.inner.text = "<secret>linkedin_password</secret>"
+        self.form_page()
+        r = await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "failed")
+
+    async def test_a_value_is_only_good_for_one_run(self):
+        self.form_page()
+        await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.inner.text = None
+        r = await self.run_pb(self.code_pb(), {"who": "Jane"})                         # it asks AGAIN, it did not remember
+        self.assertEqual(r.status, "needs_you")
+
+    async def test_with_nobody_there_it_parks_and_asks_for_the_value_later(self):
+        page = self.form_page(attended=False)
+        r = await self.run_pb(self.code_pb(), {"who": "Jane"})
+        self.assertEqual(r.status, "waiting")
+        self.assertEqual(self.inner.texts, [])
+        self.assertEqual(r.waiting, {"kind": "input", "message": "What is the code for Jane?", "detail": "", "url": "https://a.com/form",
+                                     "variable": "code", "timeout_minutes": 30, "on_timeout": "cancel", "guarded": "",
+                                     "step_id": "s2", "index": 1, "done": []})
+        self.assertEqual(r.screenshot, self.JPEG)
+
+    async def test_the_answer_given_later_is_used_when_the_run_starts_again(self):
+        page = self.form_page(attended=False)
+        r = await self.player.run(self.code_pb(), {"who": "Jane"}, answers={"s2": "987654"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.actions[1], ("input", {"index": 1, "text": "987654", "clear": True}))
+        self.assertEqual(self.inner.texts, [])
+
+    async def test_a_later_question_does_not_show_the_typed_answer_back(self):
+        pb = make_pb([S(1, "open", url="https://a.com/form"),
+                      S(2, "input", message="Code?", variable="code"),
+                      S(3, "type", target=fp("Code", "input", h=1, sh=2), text="{{code}}"),
+                      S(4, "approve", message="Send it?"),
+                      S(5, "click", target=fp("Send", h=7, sh=8), ask=True)],
+                     variables=[Variable(name="code", runtime=True)], approve=True)
+        self.build([el(1, "Code", "input", h=1, sh=2), el(4, "Send", h=7, sh=8)], attended=False)
+        r = await self.player.run(pb, {}, answers={"s2": "987654"})
+        self.assertEqual(r.status, "waiting")
+        self.assertNotIn("987654", str(r.waiting))
+        self.assertIn("what you typed in", r.waiting["detail"])
+
+    async def test_an_answer_stored_for_another_step_does_not_count(self):
+        self.form_page(attended=False)
+        r = await self.player.run(self.code_pb(), {"who": "Jane"}, answers={"s9": "987654"})
+        self.assertEqual(r.status, "waiting")
+
+    async def test_a_stored_answer_is_checked_again(self):
+        self.form_page(attended=False)
+        r = await self.player.run(self.code_pb("number"), {"who": "Jane"}, answers={"s2": "not a number"})
+        self.assertEqual(r.status, "failed")
+
+
+class SkipWhenUnanswered(PlayerCase):
+    def pb(self):
+        return make_pb([S(1, "open", url="https://a.com/"), S(2, "approve", message="Send it?", on_timeout="skip"),
+                        S(3, "click", target=fp("Send", h=7, sh=8), ask=True), S(4, "wait", seconds=1)], approve=True)
+
+    async def test_the_question_says_what_happens_without_an_answer(self):
+        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        r = await self.run_pb(self.pb())
+        self.assertEqual((r.waiting["on_timeout"], r.waiting["guarded"]), ("skip", "s3"))
+
+    async def test_when_nobody_answers_the_step_is_left_out_and_the_rest_carries_on(self):
+        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        page.risky[4] = "Send?"
+        r = await self.player.run(self.pb(), approved={"s2"}, skipped={"s3"})
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual([a for a in page.actions if a[0] == "click"], [])             # nothing was sent
+        self.assertIn("nobody answered", r.steps[2].detail)
+        self.assertEqual(r.steps[3].status, "ok")                                      # the wait after it still ran
+
+    async def test_a_later_failure_says_a_step_was_left_out_which_may_be_why(self):
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "approve", message="Send it?", on_timeout="skip"),
+                      S(3, "click", target=fp("Send", h=7, sh=8), ask=True),
+                      S(4, "click", target=fp("Sent confirmation", h=9, sh=10))], approve=True)
+        self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        r = await self.player.run(pb, approved={"s2"}, skipped={"s3"})
+        self.assertNotEqual(r.status, "done")
+        self.assertIn("left out because nobody answered", r.steps[3].detail)
+
+    async def test_a_failure_with_nothing_skipped_has_no_such_note(self):
+        pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Missing", h=9, sh=10))], approve=True)
+        self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        r = await self.player.run(pb)
+        self.assertNotIn("left out", r.steps[1].detail)
+
+    async def test_only_the_named_step_is_skipped(self):
+        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        r = await self.player.run(self.pb(), approved={"s2"}, skipped={"s99"})
+        self.assertEqual([a for a in page.actions if a[0] == "click"], [("click", {"index": 4})])
 
 
 class Timing(PlayerCase):

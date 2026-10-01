@@ -15,6 +15,7 @@ Built on [browser-use](https://github.com/browser-use/browser-use) with a FastAP
 4. Start it: `python agent_ui.py` and open <http://localhost:8000>
    (or use `launch.bat` / `AI Browser Agent.exe`, which start it without a console window).
 5. Open **Settings** in the app, choose a provider and paste its API key.
+   Optional: under **Model tiers** set a cheaper Fast model and a Strong model; unset slots use your chosen model. You can pick a tier per task (next to the task box) and per page-reading step of a playbook.
 
 Your keys and browser profiles are stored **outside this folder**, in
 `%LOCALAPPDATA%\AIBrowserAgent` (set `AIBA_DATA_DIR` to move it). Nothing secret lives in the

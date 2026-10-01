@@ -5,6 +5,7 @@ _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch rea
 
 import asyncio
 import pathlib
+import tempfile
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -454,7 +455,7 @@ class Handoff(Base, unittest.IsolatedAsyncioTestCase):
         outer = self
 
         class FakePlayer:
-            async def run(self, pb, values, approved=None):
+            async def run(self, pb, values, approved=None, done=None, answers=None, skipped=None):
                 outer.player_args = (pb, values)
                 outer.approved_seen = approved
                 if isinstance(outer.result, BaseException):
@@ -590,8 +591,10 @@ class CheckpointFlow(Base, unittest.IsolatedAsyncioTestCase):
         p.start(); self.addCleanup(p.stop)
 
         class FakePlayer:
-            async def run(self, pb, values, approved=None):
+            async def run(self, pb, values, approved=None, done=None, answers=None, skipped=None):
                 outer.approved_seen = approved
+                outer.done_seen = done
+                outer.answers_seen = answers
                 outer.starts += 1
                 return outer.result
         async def build(pb, attended):
@@ -627,7 +630,7 @@ class CheckpointFlow(Base, unittest.IsolatedAsyncioTestCase):
     async def test_the_question_is_in_the_inbox_with_buttons_and_in_the_schedule(self):
         job = await self.park()
         n = self.notes.recent()[0]
-        self.assertEqual(n["action"], {"type": "checkpoint", "schedule_id": self.schedule.id, "run_id": job.run_id})
+        self.assertEqual(n["action"], {"type": "checkpoint", "schedule_id": self.schedule.id, "run_id": job.run_id, "kind": "approve"})
         self.assertEqual(self.ws.of("notification")[0]["action"]["run_id"], job.run_id)
         row = self.client.get("/schedules").json()["schedules"][0]
         self.assertEqual(row["status"], "asking")
@@ -645,6 +648,105 @@ class CheckpointFlow(Base, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((rec["status"], rec["answered"]), ("done", ["s2"]))
         self.assertEqual(len(self.runs.recent(self.send.id)), 1)                    # one entry, not two
         self.assertEqual(self.scheds.get(self.schedule.id).state.last_status, "done")
+
+    async def input_question(self):
+        pb = self.pbs.save(pbk.refresh(Playbook(
+            name="Code", variables=[Variable(name="who"), Variable(name="code", type="number", runtime=True)],
+            steps=[Step(id="s1", kind="open", url="https://www.linkedin.com/feed/"),
+                   Step(id="s2", kind="input", message="Code for {{who}}?", variable="code"),
+                   Step(id="s3", kind="wait", seconds=1)])), approve=True)
+        self.scheds.change_state(self.schedule.id, lambda st: st.model_copy(update={"next_run": None}))     # only this one is due
+        sc = self.scheds.save(sch.Schedule(name="Codes", playbook_id=pb.id, items=[{"who": "Jane"}]))
+        self.waiting = {"kind": "input", "message": "Code for Jane?", "detail": "", "url": "", "variable": "code",
+                        "step_id": "s2", "index": 1, "timeout_minutes": 60, "on_timeout": "cancel", "guarded": ""}
+        self.result = RunResult(status="waiting", error="waiting", started_at=0, finished_at=1,
+                                steps=[StepResult("s1", "open"), StepResult("s2", "input", status="waiting")], waiting=self.waiting)
+        self.scheds.change_state(sc.id, lambda st: st.model_copy(update={"next_run": sch.iso(datetime.now() - timedelta(seconds=5))}))
+        await self.real.tick()
+        return sc, self.scheds.get(sc.id).state.parked[0]
+
+    async def test_a_question_for_a_value_is_shown_as_one_and_needs_a_value_that_fits(self):
+        sc, job = await self.input_question()
+        row = next(r for r in self.client.get("/schedules").json()["schedules"] if r["id"] == sc.id)
+        self.assertEqual((row["pending"][0]["kind"], row["pending"][0]["variable"]), ("input", "code"))
+        url = f"/schedules/{sc.id}/checkpoints/{job.run_id}/answer"
+        self.assertEqual(self.client.post(url, json={"approve": True}).status_code, 409)                     # no value
+        self.assertEqual(self.client.post(url, json={"approve": True, "value": 5}).status_code, 400)         # not text
+        r = self.client.post(url, json={"approve": True, "value": "twelve"})                                # not a number
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("number", r.json()["reason"])
+        self.assertEqual(len(self.scheds.get(sc.id).state.parked), 1)                                       # still waiting
+        self.assertEqual(self.client.post(url, json={"approve": True, "value": "42"}).json(), {"ok": True})
+        self.assertEqual(self.scheds.get(sc.id).state.resume[0].typed, ["s2"])
+
+    async def test_ticking_remember_keeps_the_answer_for_later_runs_and_otherwise_it_is_not(self):
+        from remembered_answers import RememberedAnswers
+        keep = RememberedAnswers(pathlib.Path(tempfile.mkdtemp()) / "r.json")
+        p = mock.patch.object(agent_ui, "_remembered", keep)
+        p.start(); self.addCleanup(p.stop)
+        sc, job = await self.input_question()
+        url = f"/schedules/{sc.id}/checkpoints/{job.run_id}/answer"
+        self.assertTrue(self.client.post(url, json={"approve": True, "value": "42", "remember": "true"}).json()["ok"])
+        self.assertEqual(keep.get(sc.playbook_id), {})                                    # only a real true counts
+        self.scheds.change_state(sc.id, lambda st: st.model_copy(update={"resume": [], "parked": [job]}))
+        self.assertTrue(self.client.post(url, json={"approve": True, "value": "43", "remember": True}).json()["ok"])
+        self.assertEqual(keep.get(sc.playbook_id), {"code": "43"})
+
+    async def test_an_answer_the_scheduler_turned_away_is_not_remembered(self):
+        from remembered_answers import RememberedAnswers
+        keep = RememberedAnswers(pathlib.Path(tempfile.mkdtemp()) / "r.json")
+        p = mock.patch.object(agent_ui, "_remembered", keep)
+        p.start(); self.addCleanup(p.stop)
+        sc, job = await self.input_question()
+        url = f"/schedules/{sc.id}/checkpoints/{job.run_id}/answer"
+        self.assertTrue(self.client.post(url, json={"approve": True, "value": "42"}).json()["ok"])
+        again = self.client.post(url, json={"approve": True, "value": "99", "remember": True})      # already answered
+        self.assertEqual(again.status_code, 409)
+        self.assertEqual(keep.get(sc.playbook_id), {})
+
+    async def test_a_scheduled_run_uses_a_kept_answer_and_so_does_not_ask(self):
+        from remembered_answers import RememberedAnswers
+        keep = RememberedAnswers(pathlib.Path(tempfile.mkdtemp()) / "r.json")
+        p = mock.patch.object(agent_ui, "_remembered", keep)
+        p.start(); self.addCleanup(p.stop)
+        pb = self.pbs.save(pbk.refresh(Playbook(
+            name="Code", variables=[Variable(name="code", type="number", runtime=True)],
+            steps=[Step(id="s1", kind="open", url="https://www.linkedin.com/feed/"),
+                   Step(id="s2", kind="input", message="Code?", variable="code"),
+                   Step(id="s3", kind="wait", seconds=1)])), approve=True)
+        keep.set(pb.id, "code", "42")
+        self.scheds.change_state(self.schedule.id, lambda st: st.model_copy(update={"next_run": None}))
+        sc = self.scheds.save(sch.Schedule(name="Codes", playbook_id=pb.id, items=[{}]))
+        self.scheds.change_state(sc.id, lambda st: st.model_copy(update={"next_run": sch.iso(datetime.now() - timedelta(seconds=5))}))
+        self.result = RunResult(status="done", steps=[StepResult("s1", "open")], started_at=0, finished_at=2)
+        await self.real.tick()
+        self.assertEqual(self.answers_seen, {"s2": "42"})
+
+    async def test_a_refused_answer_is_not_remembered(self):
+        from remembered_answers import RememberedAnswers
+        keep = RememberedAnswers(pathlib.Path(tempfile.mkdtemp()) / "r.json")
+        p = mock.patch.object(agent_ui, "_remembered", keep)
+        p.start(); self.addCleanup(p.stop)
+        sc, job = await self.input_question()
+        r = self.client.post(f"/schedules/{sc.id}/checkpoints/{job.run_id}/answer", json={"approve": True, "value": "twelve", "remember": True})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(keep.get(sc.playbook_id), {})
+
+    async def test_an_answer_for_a_question_the_playbook_no_longer_has_is_refused(self):
+        sc, job = await self.input_question()
+        self.scheds.change_state(sc.id, lambda st: st.model_copy(update={"parked": [
+            p.model_copy(update={"variable": "gone"}) for p in st.parked]}))
+        r = self.client.post(f"/schedules/{sc.id}/checkpoints/{job.run_id}/answer", json={"approve": True, "value": "42"})
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self.scheds.get(sc.id).state.resume, [])
+
+    async def test_the_value_reaches_the_player_when_the_run_starts_again(self):
+        sc, job = await self.input_question()
+        self.client.post(f"/schedules/{sc.id}/checkpoints/{job.run_id}/answer", json={"approve": True, "value": "42"})
+        self.result = RunResult(status="done", steps=[StepResult("s1", "open")], started_at=0, finished_at=2)
+        await self.real.tick()
+        self.assertEqual(self.answers_seen, {"s2": "42"})
+        self.assertEqual(self.approved_seen, set())                                                         # typing approves nothing
 
     async def test_no_over_http_ends_it_and_the_history_says_so(self):
         job = await self.park()

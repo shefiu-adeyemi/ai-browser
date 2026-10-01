@@ -14,7 +14,7 @@ import time
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 from urllib.parse import urlparse
 
 import uvicorn
@@ -25,11 +25,13 @@ from fastapi.staticfiles import StaticFiles
 from browser_use import Agent
 from browser_use.browser.session import BrowserSession
 from llm_config import get_llm
+import model_tiers
 import app_paths
 import env_store
 import providers
 from action_guard import GuardedTools, SAFETY_PROMPT
 from approvals import ApprovalBroker
+from remembered_answers import RememberedAnswers
 from browser_cleanup import kill_stale_browsers, trim_tabs
 from chat_store import ChatStore
 from live_view import LiveView
@@ -333,9 +335,101 @@ def _judge_enabled(provider: str) -> bool:
     return os.getenv("USE_JUDGE", "1").strip().lower() not in ("0", "off", "false", "no")
 
 
+_ledger = model_tiers.Ledger(app_paths.LLM_USAGE_FILE)      # tokens per tier and model, see model_tiers.py
+_router = model_tiers.Router(ledger=_ledger)
+_prices = model_tiers.Prices(app_paths.LLM_PRICES_FILE)     # entered by the user; the app ships none
+
+
+def _agent_tier_kwargs() -> dict:
+    """Cheaper models for the agent's small jobs (reading a page, shortening old steps) when the user has set
+    a Fast model; with none set these are the Standard model, as before. Never blocks a run."""
+    out: dict = {}
+    try:
+        if _router.distinct_from_standard("extract"):
+            out["page_extraction_llm"] = _router.escalating("extract", count=False)    # the run summary counts it
+        if _router.distinct_from_standard("compaction"):
+            from browser_use.agent.views import MessageCompactionSettings
+            out["message_compaction"] = MessageCompactionSettings(
+                compaction_llm=_router.escalating("compaction", count=False))
+    except Exception:
+        _log.exception("could not set up the model tiers; using the Standard model for everything")
+        return {}
+    return out
+
+
+def _agent_llm(tier: str | None):
+    """The model for the agent's own steps, and its provider. `tier` is what the user chose for this task
+    (None = automatic: the Standard model from Settings, as the router's table says). A tier that is not set up,
+    or the router being off, gives the Standard model; the chat says so when it happens."""
+    standard_provider = os.getenv("LLM_PROVIDER", "claude").lower()
+    if tier in (None, "standard") or not model_tiers.router_on():
+        return get_llm(), standard_provider
+    pick = _router.pick("agent", tier)
+    if pick.slot.collapsed:
+        return get_llm(), standard_provider
+    return _router.llm("agent", tier), pick.provider_id
+
+
+def _tier_note(tier: str | None) -> str:
+    """One line for the chat when the user chose a tier for this task: what will really answer."""
+    if tier is None:
+        return ""
+    if not model_tiers.router_on():
+        return "Model tiers are switched off in Settings, so this task runs on the Standard model."
+    slot = model_tiers.read_slots()[tier]
+    label = model_tiers.TIER_LABEL[tier]
+    if slot.collapsed:
+        return f"{label} isn't set up ({slot.reason}), so this task runs on the Standard model ({slot.model})."
+    return f"Model for this task: {label} ({slot.model})"
+
+
+def _escalate_for_retry(agent: Agent) -> str | None:
+    """A second attempt after the reviewer said the first was incomplete goes to the Strong model, if the user
+    set one, on any provider (browser-use itself moves an agent to another provider when its own fallback model
+    is needed). Not to DeepSeek: it can't see screenshots or give the structured answers the agent needs, so
+    handing it a run that started on a model that can would break the run. Returns the model name if it
+    switched, else None."""
+    try:
+        if not model_tiers.router_on():
+            return None
+        pick = _router.pick("retry")
+        if pick.slot.collapsed or pick.provider_id == "deepseek":
+            return None
+        stronger = _router.llm("retry")
+        if stronger.model == agent.llm.model:
+            return None
+        agent.llm = stronger
+        agent.token_cost_service.register_llm(stronger)
+        _log.info("retrying on the Strong model (%s)", stronger.model)
+        return str(stronger.model)
+    except Exception:
+        _log.exception("could not switch to the Strong model for the retry; carrying on with the same one")
+        return None
+
+
+def _record_agent_usage(agent: Agent) -> None:
+    """Count what this agent has used since the last time (browser-use reports totals for its whole life)."""
+    try:
+        usage = getattr(agent.history, "usage", None)
+        if usage is not None:
+            agent._aiba_counted = _ledger.record_agent_usage(usage.by_model, already=getattr(agent, "_aiba_counted", None))
+    except Exception:
+        _log.exception("could not count the run's AI usage")
+
+
 def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
-               sensitive_data: dict | None) -> Agent:
-    provider = os.getenv("LLM_PROVIDER", "claude").lower()
+               sensitive_data: dict | None, provider: str | None = None, pinned: bool = False) -> Agent:
+    provider = provider or os.getenv("LLM_PROVIDER", "claude").lower()
+    extra: dict = {}
+    if pinned:
+        # The reviewer stays on the Standard model, whichever model does the steps: a cheap model's own
+        # opinion of its work is the one to distrust, and one reviewing call is a small cost.
+        std_provider = os.getenv("LLM_PROVIDER", "claude").lower()
+        try:
+            extra["judge_llm"] = _router.llm("judge")
+            extra["use_judge"] = _judge_enabled(std_provider)
+        except Exception:
+            _log.exception("could not set up the reviewer on the Standard model; it uses the task's own model")
     # Every action passes through GuardedTools: credentials only into login fields,
     # risky/irreversible actions need a click on the approval prompt (see action_guard.py).
     tools = GuardedTools(
@@ -353,13 +447,15 @@ def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
         extend_system_message=SAFETY_PROMPT,
         max_actions_per_step=1,
         use_vision=provider != "deepseek",
-        use_judge=_judge_enabled(provider),
+        **{"use_judge": _judge_enabled(provider), **extra},
+        **_agent_tier_kwargs(),
     )
 
 
 async def _run_one(task: str, llm, session: BrowserSession, fmt: str, max_steps: int,
                    context: str = "", resume: bool = False,
-                   resume_agent: Agent | None = None) -> tuple[Outcome, Agent]:
+                   resume_agent: Agent | None = None, provider: str | None = None,
+                   tier: str | None = None) -> tuple[Outcome, Agent]:
     """Run one user request with ONE agent.
 
     `task` is always what the user asked. A retry, and a Continue after the step limit, are
@@ -371,7 +467,8 @@ async def _run_one(task: str, llm, session: BrowserSession, fmt: str, max_steps:
         agent.add_new_task(_wrap_task(_augment_task(_CONTINUE_PROMPT.format(task=task)), fmt, context))
     else:
         first = _CONTINUE_PROMPT.format(task=task) if resume else task   # resume, but the agent was lost
-        agent = _new_agent(_wrap_task(_augment_task(first), fmt, context), task, llm, session, sensitive_data)
+        agent = _new_agent(_wrap_task(_augment_task(first), fmt, context), task, llm, session, sensitive_data,
+                           provider=provider, pinned=tier is not None)
 
     step_limit = agent.history.number_of_steps() + max_steps
     history = await agent.run(max_steps=max_steps)
@@ -388,6 +485,9 @@ async def _run_one(task: str, llm, session: BrowserSession, fmt: str, max_steps:
                           "retry": retries})
         await _broadcast({"type": "action", "text": f"↻ Retry {retries}/{_max_retries()}"})
         try:
+            switched = None if tier else _escalate_for_retry(agent)     # a tier the user chose is kept, not climbed
+            if switched:
+                await _broadcast({"type": "action", "text": f"↻ Trying again on the Strong model ({switched})"})
             agent.add_new_task(_wrap_task(refinement_prompt(_augment_task(task), outcome.reason), fmt, context))
             history = await agent.run(max_steps=steps_left)
         except asyncio.CancelledError:
@@ -470,7 +570,8 @@ def _remember_run(task: str, agent: Agent) -> None:
     _last_run = {"task": task, "history": agent.history, "session_id": _current_session_id}
 
 
-async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: bool = False) -> None:
+async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: bool = False,
+                   tier: str | None = None) -> None:
     """One agent run. Started/stopped only through _ctl (see task_control.py), which owns the
     running/paused flags, so this function never sets them and never touches the browser's
     lifetime."""
@@ -494,8 +595,10 @@ async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: boo
         await _persist()
         # A resumed agent keeps the LLM client it started with; only a fresh agent needs a new one.
         resumable = resume and _paused_agent is not None
-        llm = None if resumable else get_llm()
-        provider = os.getenv("LLM_PROVIDER", "claude").lower()
+        llm, provider = (None, os.getenv("LLM_PROVIDER", "claude").lower()) if resumable else _agent_llm(tier)
+        note = "" if resumable else _tier_note(tier)
+        if note:
+            await _broadcast({"type": "action", "text": note})
         if provider == "deepseek":
             await _broadcast({"type": "action",
                 "text": "⚠️ Note: DeepSeek has limited browser-use compatibility. "
@@ -505,12 +608,13 @@ async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: boo
         # replaced since (the browser died), it can't be resumed: start fresh with the continue wording.
         resume_agent = _paused_agent if (resumable and _paused_agent.browser_session is session) else None
         if resumable and resume_agent is None:
-            llm = get_llm()
+            llm, provider = _agent_llm(tier)
         if not resume:
             await trim_tabs(session)    # the browser is long-lived now: don't let tabs pile up
         _paused_agent = None            # a new request, or the one being resumed, leaves the paused slot
         outcome, agent = await _run_one(task, llm, session, fmt, max_steps, context,
-                                        resume=resume, resume_agent=resume_agent)
+                                        resume=resume, resume_agent=resume_agent, provider=provider, tier=tier)
+        _record_agent_usage(agent)
         duration = round((datetime.now() - started).total_seconds(), 1)
 
         if outcome.status == "limit":
@@ -670,6 +774,7 @@ async def _shutdown() -> None:
     """Stop any run and close the browser, so quitting the app leaves no Chromium behind."""
     if _scheduler_task is not None:
         _scheduler_task.cancel()
+    _ledger.flush()
     _broker.cancel_all()
     await _ctl.stop()
     if _live_task is not None:
@@ -914,11 +1019,16 @@ def _as_int(value, default: int, low: int = 1, high: int = 1000) -> int:
 async def start_task(body: dict):
     task = (body.get("task") or "").strip()
     fmt  = body.get("fmt", "auto")
+    tier = body.get("tier")
     if not task:
         return {"ok": False, "reason": "empty task"}
+    if tier in (None, "", "auto"):
+        tier = None                                 # automatic: the router's own choice
+    elif tier not in model_tiers.TIERS:
+        return {"ok": False, "reason": f"'{str(tier)[:20]}' is not a model tier (fast, standard or strong)"}
     try:
         # The slot is claimed synchronously inside start(), so a double-click can't run two agents.
-        _ctl.start(lambda: _run_guarded(run_task(task, fmt)), origin=task, fmt=fmt)
+        _ctl.start(lambda: _run_guarded(run_task(task, fmt, tier=tier)), origin=task, fmt=fmt, tier=tier)
     except Busy as e:
         return {"ok": False, "reason": str(e)}
     return {"ok": True}
@@ -943,7 +1053,7 @@ async def stop_task():
 async def continue_task(body: dict):
     extra = _as_int(body.get("extra_steps"), _as_int(os.getenv("MAX_STEPS"), 60), low=10)
     try:
-        _ctl.resume(lambda: _run_guarded(run_task(_ctl.origin_task, _ctl.fmt, extra, resume=True)))
+        _ctl.resume(lambda: _run_guarded(run_task(_ctl.origin_task, _ctl.fmt, extra, resume=True, tier=_ctl.tier)))
     except Busy as e:
         return {"ok": False, "reason": str(e)}
     return {"ok": True}
@@ -952,15 +1062,16 @@ async def continue_task(body: dict):
 @app.post("/approvals/{aid}")
 async def answer_approval(aid: str, body: dict):
     """The user's answer to an approval / hand-off prompt."""
-    ok = _broker.resolve(aid, bool(body.get("allow")))
+    text = body.get("text")
+    ok = _broker.resolve(aid, body.get("allow") is True, text if isinstance(text, str) else None, body.get("remember") is True)     # only a real true is a yes
     if not ok:   # already answered, timed out, or stopped: worth a trace when a click "does nothing"
         _log.warning("approval answer for %s matched no pending request", aid)
     return {"ok": ok}
 
 
 SETTINGS_KEYS = [
-    "LLM_PROVIDER", "LLM_MODEL",
-    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY",
+    "LLM_PROVIDER", "LLM_MODEL", "LLM_FAST_PROVIDER", "LLM_FAST_MODEL", "LLM_STRONG_PROVIDER", "LLM_STRONG_MODEL",
+    "LLM_ROUTER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY",
     "LINKEDIN_EMAIL", "LINKEDIN_PASSWORD", "MAX_STEPS", "CONTEXT_TURNS", "APPROVAL_MODE",
 ]
 
@@ -986,6 +1097,12 @@ async def get_settings():
     # user can see and fix it.
     d["LLM_PROVIDER"] = providers.resolve_provider_id(d["LLM_PROVIDER"]) or d["LLM_PROVIDER"]
     d["LLM_MODEL"] = providers.strip_model_prefix(d["LLM_MODEL"])
+    for tier_key in ("LLM_FAST_PROVIDER", "LLM_STRONG_PROVIDER"):
+        d[tier_key] = (providers.resolve_provider_id(d[tier_key]) or d[tier_key]) if d[tier_key] else ""
+    for tier_key in ("LLM_FAST_MODEL", "LLM_STRONG_MODEL"):
+        d[tier_key] = providers.strip_model_prefix(d[tier_key])
+    d["LLM_ROUTER"] = "off" if d["LLM_ROUTER"].strip().lower() == "off" else "auto"
+    d["TIERS"] = model_tiers.describe()                  # what each slot really resolves to, and why
     d["APPROVAL_MODE"] = d["APPROVAL_MODE"] or "ask"
     d["UNREADABLE"] = env_store.unreadable_secrets(ENV_PATH)     # stored secrets this account can't decrypt
     # Numbers go out as integers (the UI sliders need that); junk in the file falls back to the
@@ -1011,6 +1128,36 @@ async def save_settings(body: dict):
         return JSONResponse({"ok": False, "errors": errors}, status_code=400)
     _write_env(updates)
     return {"ok": True}
+
+
+@app.get("/models/tiers")
+async def models_tiers():
+    """How the three tiers are set up right now (what each really uses and why), without the usage figures."""
+    return {"ok": True, "tiers": model_tiers.describe()}
+
+
+@app.get("/models/usage")
+async def models_usage(days: int = 7):
+    """Tokens used per tier and model over the last few days, and how the tiers are set up now."""
+    usage = _ledger.summary(_as_int(days, 7, low=1, high=35))
+    return {"ok": True, "tiers": model_tiers.describe(), "usage": usage,
+            "cost": model_tiers.estimate_cost(usage, _prices.all()), "prices": _prices.all()}
+
+
+@app.post("/models/prices")
+async def set_model_price(body: dict):
+    """Save (or, with both prices null, remove) what one model costs per million tokens, for cost estimates."""
+    model = body.get("model")
+    if not isinstance(model, str):
+        return JSONResponse({"ok": False, "reason": "a model name is needed"}, status_code=400)
+    try:
+        _prices.set(model, body.get("input"), body.get("output"))
+    except ValueError as e:
+        return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
+    except OSError as e:
+        _log.exception("could not save a model price")
+        return JSONResponse({"ok": False, "reason": f"Couldn't write it to disk ({type(e).__name__})."}, status_code=500)
+    return {"ok": True, "prices": _prices.all()}
 
 
 @app.get("/conversation")
@@ -1094,6 +1241,7 @@ async def delete_session(sid: str):
 # Playbooks (see PLAYBOOKS.md)
 # ---------------------------------------------------------------------------
 _playbooks = PlaybookStore(app_paths.PLAYBOOKS_DIR)
+_remembered = RememberedAnswers(app_paths.REMEMBERED_ANSWERS_FILE)
 _runs = RunStore(app_paths.PLAYBOOK_RUNS_DIR)
 
 
@@ -1108,17 +1256,37 @@ async def _build_player(pb: pbk.Playbook, attended: bool) -> PlaybookPlayer:
     approver = StepApprover(_broker, attended=attended)
     tools = GuardedTools(approver, mode="ask", secret_names={k for v in (sensitive or {}).values() for k in v},
                          notify=_broadcast, task=pb.name)
-    llm = None
+    llm, llm_for = None, None
     if any(s.kind == "extract" for s in pb.steps):
         try:
-            llm = get_llm()
+            if model_tiers.read_slots()["standard"].usable:   # no key at all: no model, so the step says so plainly
+                llm = _router.escalating("playbook_extract")  # a cheap model first, a stronger one if it fails
+                # a step the user pinned to a tier gets exactly that tier (its model comes from Settings at run time)
+                llm_for = lambda tier: _router.escalating("playbook_extract", tier=tier)
         except Exception as e:                  # the step then fails with a clear message
             _log.warning("no model for a playbook extract step: %s", e)
 
     async def say(text: str) -> None:
         await _broadcast({"type": "action", "text": text})
 
-    return PlaybookPlayer(SessionDriver(session, tools, sensitive_data=sensitive, llm=llm), approver, notify=say)
+    def keep(variable: str, value: str) -> None:
+        _remembered.set(pb.id, variable, value)
+
+    return PlaybookPlayer(SessionDriver(session, tools, sensitive_data=sensitive, llm=llm, llm_for=llm_for), approver, notify=say,
+                          remember=keep)
+
+
+def _remembered_answers(pb: pbk.Playbook) -> dict[str, str]:
+    """Answers the user chose to keep, by input step id, for the questions this playbook asks. One that no
+    longer fits its variable is ignored, so the question is simply asked again."""
+    mine = _remembered.get(pb.id)
+    out: dict[str, str] = {}
+    variables = {v.name: v for v in pb.variables}
+    for s in pb.steps:
+        v = variables.get(s.variable or "")
+        if s.kind == "input" and v is not None and v.name in mine and not pbk.value_problems(v, mine[v.name]):
+            out[s.id] = mine[v.name]
+    return out
 
 
 def _save_run_record(pb: pbk.Playbook, record: dict, status: str, error: str, result=None) -> None:
@@ -1158,7 +1326,7 @@ async def run_playbook_task(pb: pbk.Playbook, values: dict, run_id: str) -> None
         await _broadcast({"type": "status", "text": "running"})
         await _persist()
         player = await _build_player(pb, attended=True)
-        result = await player.run(pb, values)
+        result = await player.run(pb, values, answers=_remembered_answers(pb))
         text = summarize(pb, result)
         _conversation_history.append({"role": "agent", "content": text, "ts": datetime.now().strftime("%H:%M")})
         verdict = "pass" if result.status == "done" else "fail"
@@ -1196,7 +1364,8 @@ def _count_usage(pb: pbk.Playbook, values: dict) -> None:
 
 
 async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, schedule: Schedule, row: int,
-                                  approved: frozenset = frozenset()) -> SchedOutcome:
+                                  approved: frozenset = frozenset(), done: frozenset = frozenset(),
+                                  answers: Optional[dict] = None, skipped: frozenset = frozenset()) -> SchedOutcome:
     """A scheduled run: nobody is there, so nothing is asked. A step that needs approval stops the run, and an
     approve step PARKS it (the question goes to the inbox; `approved` carries the answers already given when it
     is run again). It leaves the user's chat alone; the record and the inbox are where it is reported."""
@@ -1208,7 +1377,8 @@ async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, s
         await _broadcast({"type": "status", "text": "running"})
         await _broadcast({"type": "action", "text": f"⏰ Scheduled: {schedule.name} (row {row + 1} of {len(schedule.items)})"})
         player = await _build_player(pb, attended=False)
-        result = await player.run(pb, values, approved=set(approved))
+        result = await player.run(pb, values, approved=set(approved), done=set(done),
+                                  answers={**_remembered_answers(pb), **dict(answers or {})}, skipped=set(skipped))
         if result.waiting:
             record["waiting"] = result.waiting
         _save_run_record(pb, record, result.status, result.error, result)
@@ -1409,10 +1579,26 @@ async def delete_playbook(pid: str):
         deleted = _playbooks.delete(pid)
         _runs.delete_playbook_runs(pid)
         removed = _schedules.delete_for_playbook(pid)
+        _remembered.forget(pid)
         return {"ok": True, "deleted": deleted, "schedules_deleted": removed}
     except OSError as e:
         _log.exception("could not delete a playbook")
         return _pb_error(500, f"Couldn't delete it ({type(e).__name__}: {e}).")
+
+
+@app.get("/playbooks/{pid}/remembered")
+async def remembered_answers(pid: str):
+    """Which typed answers are being kept for this playbook (names only, never the values)."""
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    return {"ok": True, "variables": _remembered.names(pid)}
+
+
+@app.delete("/playbooks/{pid}/remembered/{name}")
+async def forget_answer(pid: str, name: str):
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    return {"ok": True, "forgotten": _remembered.forget(pid, name)}
 
 
 @app.post("/playbooks/{pid}/restore")
@@ -1459,16 +1645,18 @@ async def _notify_user(level: str, title: str, text: str = "", **ids) -> None:
 
 
 async def _execute_scheduled(pb: pbk.Playbook, values: dict, schedule: Schedule, row: int,
-                             approved: frozenset = frozenset(), run_id: str | None = None) -> SchedOutcome:
+                             approved: frozenset = frozenset(), done: frozenset = frozenset(),
+                             run_id: str | None = None, answers: Optional[dict] = None,
+                             skipped: frozenset = frozenset()) -> SchedOutcome:
     """Hand one row to the same single-run slot a manual task uses, and wait for how it ended. A run the user
     has answered is run again under its own run id (so it is one entry in the history, not two)."""
     run_id = run_id or RunStore.new_id()
-    done: asyncio.Future = asyncio.get_running_loop().create_future()
+    finished: asyncio.Future = asyncio.get_running_loop().create_future()
 
     async def job() -> None:
-        outcome = await run_playbook_unattended(pb, values, run_id, schedule, row, approved)
-        if not done.done():
-            done.set_result(outcome)
+        outcome = await run_playbook_unattended(pb, values, run_id, schedule, row, approved, done, answers, skipped)
+        if not finished.done():
+            finished.set_result(outcome)
 
     try:
         _ctl.start(lambda: _run_guarded(job()), origin=f"Scheduled: {schedule.name}", fmt="auto")
@@ -1476,12 +1664,12 @@ async def _execute_scheduled(pb: pbk.Playbook, values: dict, schedule: Schedule,
         return SchedOutcome("busy")                       # the user started something in the meantime: wait
 
     def ended(task: asyncio.Task) -> None:               # however the run ends (even cancelled before it began)
-        if not done.done():
-            done.set_result(SchedOutcome("stopped" if task.cancelled() else "failed", run_id,
+        if not finished.done():
+            finished.set_result(SchedOutcome("stopped" if task.cancelled() else "failed", run_id,
                                          "Stopped by you." if task.cancelled() else "The run ended unexpectedly."))
     if _ctl.task is not None:
         _ctl.task.add_done_callback(ended)
-    return await done
+    return await finished
 
 
 async def _scheduler_housekeeping(days: int) -> None:
@@ -1537,7 +1725,8 @@ def _schedule_view(s: Schedule, names: dict[str, str]) -> dict:
         "paused_detail": st.paused_detail, "missed": st.missed, "runs_total": st.runs_total,
         "remaining": len(st.queue), "resume_after": st.resume_after,
         "pending": [{"run_id": p.run_id, "row": p.row, "message": p.message, "detail": p.detail, "url": p.url,
-                     "parked_at": p.parked_at, "expires_at": p.expires_at} for p in st.parked],
+                     "parked_at": p.parked_at, "expires_at": p.expires_at, "kind": p.kind, "variable": p.variable,
+                     "on_timeout": p.on_timeout} for p in st.parked],
     }
 
 
@@ -1623,7 +1812,22 @@ async def answer_checkpoint(sid: str, rid: str, body: dict):
         return bad
     if not RunStore.is_valid_id(rid):
         return _pb_error(400, "invalid run id")
-    why = await _scheduler.answer(sid, rid, body.get("approve") is True)
+    value = body.get("value")
+    if value is not None and not isinstance(value, str):
+        return _pb_error(400, "the answer must be text")
+    yes = body.get("approve") is True
+    s = _schedules.get(sid)
+    job = next((p for p in s.state.parked if p.run_id == rid), None) if s else None
+    if yes and job is not None and job.kind == "input" and isinstance(value, str) and value.strip():
+        pb = _playbooks.get(s.playbook_id) if pbk_id_ok(s.playbook_id) else None
+        var = next((v for v in pb.variables if v.name == job.variable), None) if pb else None
+        if var is None:
+            return _pb_error(404, "The playbook this was waiting in no longer has that question.")
+        if problems := pbk.value_problems(var, value.strip()):
+            return _pb_error(400, f"That answer {problems[0]}.")
+    why = await _scheduler.answer(sid, rid, yes, value)
+    if not why and yes and job is not None and job.kind == "input" and body.get("remember") is True and s is not None:
+        _remembered.set(s.playbook_id, job.variable, value.strip())            # the user chose to keep it for later runs
     if not why:
         return {"ok": True}
     return _pb_error(404 if "no longer exists" in why else 409, why)

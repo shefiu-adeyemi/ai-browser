@@ -48,7 +48,8 @@ def _clean_action(action: Optional[dict]) -> Optional[dict]:
     """What a notification lets the user DO (answer a question). Only known, plain fields are kept."""
     if not isinstance(action, dict) or action.get("type") != "checkpoint":
         return None
-    keep = {k: str(action.get(k, ""))[:80] for k in ("type", "schedule_id", "run_id")}
+    keep = {k: str(action.get(k, ""))[:80] for k in ("type", "schedule_id", "run_id", "kind")}
+    keep["kind"] = "input" if keep["kind"] == "input" else "approve"
     return keep if keep["schedule_id"] and keep["run_id"] else None
 
 

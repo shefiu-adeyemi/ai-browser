@@ -1,4 +1,4 @@
-# Playbooks: design (approved; phases 1, 2 and 3 built, see the status sections at the end)
+# Playbooks: design (approved; phases 1 to 4 built, see the status sections at the end)
 
 Full plan = this file (core: recording, approval policy, first playbook, build order) plus
 PLAYBOOKS_ROADMAP.md (scrape + batch, change monitoring + notifications, human checkpoints, natural
@@ -231,3 +231,61 @@ MVP limits fixed:
 Still limits for after the MVP: general AI steps; self-repair of a broken step (the report now helps a
 person fix it); checkpoints/approvals answered from the inbox; a background service so schedules run with the
 app closed; a daily time inside a clock-change hour counts as missed.
+
+
+## Phase 4 status: human checkpoints (built and tested)
+A playbook can contain an **approve step** ("Ask you first"): the user is asked, with exactly what is about
+to happen (and the text just typed), before the step that follows. In the editor, every risky step has an
+"Ask me each time this runs" tick that puts one in front of it.
+
+- **Attended** (you are running it): the question appears as the usual approval prompt. A yes lets the NEXT
+  step through without a second question.
+- **Unattended** (scheduled): the run is PARKED, not stopped. It is saved with the question, a picture of the
+  page, the inputs and the answers so far; the browser is freed at once. The question goes to the inbox (with
+  Go ahead / Don't buttons) and shows on the schedule. A schedule can then run a send WITHOUT the blanket
+  "let these steps run while I'm away" tick, because every send is asked about.
+- **Yes**: the run starts again from the top under the same run id. Steps that reach other people and already
+  ran are SKIPPED, never repeated (so no message goes out twice); harmless steps (open, type, click around)
+  simply run again. The send only happens if its button is found with certainty, exactly as before; a yes
+  does not excuse a doubtful match. Only the one step after the question is covered.
+- **No** or **silence** (default 24 h, set per step from 1 hour to 7 days): cancelled, never sent. The history
+  says "You said no" / "No answer". An answer that waits more than 24 h past the deadline is void.
+- **Safety**: if the playbook was edited or un-approved while waiting, the yes is void. An answered run goes
+  before other waiting work, is marked in flight and removed from the list BEFORE it runs, so a crash can't
+  run it twice. Only a real `true` is a yes. Deleting a schedule cancels what it was waiting on.
+- Tests: `test_playbook.py` (format), `test_playbook_player.py` (Checkpoints), `test_scheduler.py`
+  (Checkpoints), `test_schedules_app.py` (CheckpointFlow), and four opt-in real-browser tests
+  (`test_scheduler_browser.py`): a scheduled send waits for a yes then sends exactly once; a no never sends;
+  silence never sends; a yes does not excuse an unsure match.
+
+### Phase 4 additions: typed answers and "skip on silence" (built and tested)
+- **Typed value mid-run** (an `input` step): a text/number variable marked `runtime` is not asked for when
+  the run starts; the run asks for it when it gets there (a code, a name). In the editor, a "type" step has
+  "Ask me for this text each time this runs", which adds the question and a `{{answer_N}}` variable.
+  Attended: a text box in the prompt. Unattended: the run parks like any checkpoint; the inbox / Schedules
+  card shows a text box (Send / Don't). The answer is checked like any input (number, length, no secret
+  placeholders) both when typed and again when the run starts, is kept only for that run, and is never written
+  to the run record, the log, or shown back in a later question ("Typed just before" says "what you typed in
+  when asked"). Typing a value approves nothing: a send after it still asks its own question.
+  **You decide whether it is kept**: every answer box has "Remember this for next runs" (off by default).
+  Unticked, the answer lives in the app's memory for that one run and is NEVER written to disk (if the app is
+  closed before the run starts again, the run is cancelled and must be started again, rather than saved
+  anywhere). Ticked, it is saved on this computer (`remembered_answers.json`, per playbook and question) and
+  that question is no longer asked; the editor lists kept answers (names only) with a Forget button, and
+  deleting the playbook forgets them. A kept answer that no longer fits its variable is ignored and asked
+  again. Don't tick it for codes or passwords: the file is plain text.
+- **Skip and carry on** (`on_timeout: skip` on an approve step): if nobody answers in time, the guarded step
+  is left out (never run) and the rest of the playbook carries on, instead of cancelling the whole run. Only
+  allowed when the very next step is one that needs approval. A no is still a no. Whatever ran before the
+  skipped step (e.g. text typed into a box) stays as it was (the notification says so); if a later step then
+  fails, its message says a step was left out because nobody answered, which may be why.
+- **Review fixes**: the approvals endpoint no longer treats any truthy value as a yes (only a real `true`);
+  answer length capped; a typed answer for a question the playbook no longer has is refused; the editor keeps
+  a guard directly in front of the step it guards, and deleting a question puts the typed text back.
+- Tests: new classes in `test_playbook.py` (InputStep, SkipOnTimeout), `test_playbook_player.py`
+  (InputsDuringTheRun, SkipWhenUnanswered), `test_scheduler.py` (InputQuestions), `test_schedules_app.py`,
+  `test_approvals_paths.py`, frontend `shared.test.ts`, `ValueAnswer.test.tsx`, `ApprovalPrompt.test.tsx`,
+  and three more opt-in real-browser tests. A 19-item mutation check (break one piece, a test must fail)
+  caught every change.
+
+Not built: answering from outside the app (email/phone), by design for now.

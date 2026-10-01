@@ -53,6 +53,8 @@ class StepResult:
     matched: Optional[str] = None     # how the element was found (exact, stable, identity, ...)
     approval: Optional[str] = None    # preapproved | asked | None
     output: Optional[str] = None      # what an extract step read
+    model: Optional[str] = None       # which model read it, with its tier: "claude-haiku-4-5 (Fast)"
+    tokens: Optional[int] = None      # what that cost in tokens (prompt + answer), when the model reported it
     fatal: bool = False               # the run must stop even if later steps could go on
     meta: Optional[dict] = None       # for a waiting step: what is being asked (see PlaybookPlayer._approve)
 
@@ -112,15 +114,33 @@ class StepApprover:
         self.last = "asked" if ok else "denied"
         return ok
 
+    async def ask_text(self, title: str, detail: str = "", url: str = "") -> Optional[str]:
+        """Ask the user to type something. None unless a person is here and answers."""
+        if not self.attended or self.inner is None or not hasattr(self.inner, "ask_text"):
+            self.last = "unattended"
+            return None
+        began = self._clock()
+        try:
+            text = await self.inner.ask_text(title, detail, url)
+        finally:
+            self.waited += self._clock() - began
+        self.last = "asked" if text else "denied"
+        return text
+
 
 # ------------------------------------------------------------------------------- driver
 class SessionDriver:
     """The real page: browser-use's BrowserSession, acting through GuardedTools."""
 
     def __init__(self, session: Any, tools: Any, *, sensitive_data: Optional[dict] = None,
-                 llm: Any = None, action_timeout: float = 120.0) -> None:
+                 llm: Any = None, action_timeout: float = 120.0,
+                 llm_for: Optional[Callable[[str], Any]] = None) -> None:
         self.session, self.tools = session, tools
         self.sensitive_data, self.llm, self.action_timeout = sensitive_data, llm, action_timeout
+        self.llm_for = llm_for                      # builds the model for a tier a step asks for (None: one model for all)
+        self._by_tier: dict[str, Any] = {}
+        self.last_model: Optional[str] = None       # who answered the last model call, for the run record
+        self.last_tokens: Optional[int] = None      # and what it used, when the model reports that
 
     @property
     def has_llm(self) -> bool:
@@ -167,17 +187,40 @@ class SessionDriver:
             last = state
             await asyncio.sleep(0.25)
 
-    async def act(self, name: str, params: dict) -> Any:
+    def _llm(self, tier: Optional[str]) -> Any:
+        if not tier or self.llm_for is None:
+            return self.llm
+        if tier not in self._by_tier:
+            self._by_tier[tier] = self.llm_for(tier)
+        return self._by_tier[tier]
+
+    @staticmethod
+    def _who(llm: Any) -> Optional[str]:
+        model = getattr(llm, "model", None)
+        if not isinstance(model, str) or not model:
+            return None
+        label = {"fast": "Fast", "standard": "Standard", "strong": "Strong"}.get(getattr(llm, "tier", ""), "")
+        return f"{model} ({label})" if label else model
+
+    async def act(self, name: str, params: dict, tier: Optional[str] = None) -> Any:
         from typing import Union
         from pydantic import create_model
         from browser_use.agent.views import ActionModel
         reg = self.tools.registry.registry.actions[name]
         Model = create_model("PlaybookAction", __base__=ActionModel, **{name: (Union[reg.param_model, None], None)})
         action = Model(**{name: reg.param_model(**params)})
-        return await asyncio.wait_for(
-            self.tools.act(action, self.session, page_extraction_llm=self.llm,
-                           sensitive_data=self.sensitive_data, action_timeout=self.action_timeout),
-            timeout=self.action_timeout + 15)
+        llm = self._llm(tier)
+        if name == "extract" and hasattr(llm, "reset_tokens"):
+            llm.reset_tokens()
+        try:
+            return await asyncio.wait_for(
+                self.tools.act(action, self.session, page_extraction_llm=llm,
+                               sensitive_data=self.sensitive_data, action_timeout=self.action_timeout),
+                timeout=self.action_timeout + 15)
+        finally:
+            self.last_model = self._who(llm) if name == "extract" else None
+            used = getattr(llm, "tokens", None) if name == "extract" else None
+            self.last_tokens = used if isinstance(used, int) and used > 0 else None
 
 
 # ------------------------------------------------------------------------------- helpers
@@ -214,7 +257,9 @@ class PlaybookPlayer:
     def __init__(self, driver: Any, approver: StepApprover, *, notify: Optional[Callable[[str], Awaitable[None]]] = None,
                  settle: float = 0.7, find_timeout: float = 10.0, poll: float = 0.5,
                  max_seconds: float = MAX_RUN_SECONDS, clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 remember: Optional[Callable[[str, str], None]] = None) -> None:
+        self._remember = remember                              # called with (variable, value) for an answer to keep
         self.driver, self.approver, self._notify = driver, approver, notify
         self.settle, self.find_timeout, self.poll = settle, find_timeout, poll
         self.max_seconds, self._clock, self._sleep = max_seconds, clock, sleep
@@ -228,10 +273,18 @@ class PlaybookPlayer:
 
     # ----------------------------------------------------------------------------- run
     async def run(self, pb: Playbook, supplied: Optional[dict] = None,
-                  approved: Optional[set[str]] = None) -> RunResult:
+                  approved: Optional[set[str]] = None, done: Optional[set[str]] = None,
+                  answers: Optional[dict[str, str]] = None, skipped: Optional[set[str]] = None) -> RunResult:
         """Run the playbook from the top. `approved` holds the ids of approve steps the user has ALREADY said
         yes to in an earlier attempt of this same run: they pass at once (and grant the step after them), which
-        is how a run that was parked while nobody was there carries on once the user answers."""
+        is how a run that was parked while nobody was there carries on once the user answers.
+
+        `done` holds the ids of steps that reach other people or can't be undone and ALREADY ran in that earlier
+        attempt. They are skipped, never repeated: starting again from the top must not send a message twice.
+        Everything else (opening pages, typing, clicking around) is simply done again.
+
+        `answers` maps the id of an `input` step to the text the user already typed for it. `skipped` holds ids
+        of steps to leave out because the user did not answer in time and the question said to carry on."""
         result = RunResult(started_at=self._clock())
 
         def finish(status: str, error: str = "") -> RunResult:
@@ -252,6 +305,10 @@ class PlaybookPlayer:
                             for s in pb.steps)
         self._values = values
         self._approved_cps = set(approved or ())
+        self._skip = set(done or ())
+        self._answers = dict(answers or {})
+        self._unanswered = set(skipped or ())
+        self._did: set[str] = set(done or ())       # risky steps that have run, in this attempt or an earlier one
         self._granted: set[str] = set()         # steps the user said yes to at an approve step, for THIS run only
         self._typed = ""                        # the last text typed (never a secret), shown at the next approve step
         self._steps = pb.steps
@@ -264,13 +321,20 @@ class PlaybookPlayer:
         self._allowed = allowed
 
         total = len(pb.steps)
+        left_out = False                                              # a step was skipped because nobody answered
         for n, step in enumerate(pb.steps, start=1):
             if self._clock() - result.started_at - self.approver.waited > self.max_seconds:
                 return finish("failed", f"Stopped: the run took longer than {int(self.max_seconds)} seconds.")
             await self._say(f"▶ Step {n}/{total}: {describe(step)}")
             t0 = self._clock()
             try:
-                res = await self._step(step)
+                if step.id in self._unanswered:
+                    left_out = True
+                    res = StepResult(step.id, step.kind, detail="Skipped: nobody answered the question in time.")
+                elif step.id in self._skip:
+                    res = StepResult(step.id, step.kind, detail="Already done before the question, so not repeated.")
+                else:
+                    res = await self._step(step)
             except asyncio.CancelledError:
                 raise
             except Exception as e:                                     # a bug must not become a silent skip
@@ -283,6 +347,8 @@ class PlaybookPlayer:
             res.seconds = round(self._clock() - t0, 2)
             result.steps.append(res)
 
+            if res.status == "ok" and step.ask and step.id not in self._skip:
+                self._did.add(step.id)
             if res.status == "ok":
                 if res.output is not None:
                     result.outputs.append({"step_id": step.id, "query": step.query or "", "text": res.output})
@@ -292,10 +358,12 @@ class PlaybookPlayer:
                     res.detail = f"Stopped: the page went to {left}, which this playbook is not approved to visit."
                 else:
                     await self._check_sign_in(res)
+            if left_out and res.status in ("failed", "needs_you") and "was skipped" not in res.detail:
+                res.detail += " (An earlier step was left out because nobody answered, which may be why.)"
             if res.status == "waiting":
                 await self._say(f"⏸ Step {n} is waiting for you: {res.detail}")
                 result.screenshot = await self._picture()
-                result.waiting = {**(res.meta or {}), "step_id": step.id, "index": n - 1}
+                result.waiting = {**(res.meta or {}), "step_id": step.id, "index": n - 1, "done": sorted(self._did)}
                 return finish("waiting", f"Step {n} ({describe(step)}): waiting for you.")
             if res.status != "ok":
                 await self._say(f"✖ Step {n} stopped the run: {res.detail}")
@@ -318,6 +386,8 @@ class PlaybookPlayer:
             return await self._handoff(step)
         if kind == "approve":
             return await self._approve(step)
+        if kind == "input":
+            return await self._input(step)
         if kind == "back":
             return await self._act_step(step, "go_back", {})
         if kind == "wait":
@@ -338,7 +408,7 @@ class PlaybookPlayer:
                 return StepResult(step.id, kind, status="failed",
                                   detail="This step reads the page with an AI model, and none is set up (see Settings).")
             query = pbk.render(step.query, self._values) or ""
-            res = await self._act_step(step, "extract", {"query": query})
+            res = await self._act_step(step, "extract", {"query": query}, tier=step.tier)
             if res.status == "ok":
                 res.output = (res.output or "")[:MAX_OUTPUT]
             return res
@@ -398,10 +468,46 @@ class PlaybookPlayer:
                 if later is not None:
                     self._granted.add(later.id)
                 return StepResult(step.id, "approve", approval="asked")
-            return StepResult(step.id, "approve", status="needs_you", detail=f"You said no: {message}")
+            return StepResult(step.id, "approve", status="needs_you",
+                              detail=f"Not approved (you said no, or nobody answered in time): {message}")
         return StepResult(step.id, "approve", status="waiting", detail=message,
-                          meta={"message": message, "detail": detail, "url": url,
-                                "timeout_minutes": step.timeout_minutes or pbk.DEFAULT_APPROVAL_MINUTES})
+                          meta={"kind": "approve", "message": message, "detail": detail, "url": url,
+                                "timeout_minutes": step.timeout_minutes or pbk.DEFAULT_APPROVAL_MINUTES,
+                                "on_timeout": step.on_timeout or "cancel",
+                                "guarded": later.id if later is not None else ""})
+
+    async def _input(self, step: Step) -> StepResult:
+        """Ask the user to TYPE a value the rest of the run needs (a code, a name, a number). It is checked like
+        any input, kept only for this run unless the user chose to remember it, and never written to the log. With nobody there the run is parked."""
+        message = pbk.render(step.message, self._values) or ""
+        var = self._variables.get(step.variable or "")
+        if var is None:                                           # validation prevents this; never guess
+            return StepResult(step.id, "input", status="failed", detail=f"'{step.variable}' is not a variable.")
+        url = await self._safe_url()
+        value = self._answers.get(step.id)
+        asked = False
+        keep = False                                              # the user ticked "remember this for next runs"
+        if value is None and self.approver.attended and self.approver.inner is not None:
+            value, asked = await self.approver.ask_text(message, "", url), True
+            if value is None:
+                return StepResult(step.id, "input", status="needs_you", detail=f"No answer was given: {message}")
+            keep = bool(getattr(value, "remember", False))
+        if value is None:
+            return StepResult(step.id, "input", status="waiting", detail=message,
+                              meta={"kind": "input", "message": message, "detail": "", "url": url, "variable": var.name,
+                                    "timeout_minutes": step.timeout_minutes or pbk.DEFAULT_APPROVAL_MINUTES,
+                                    "on_timeout": "cancel", "guarded": ""})
+        value = value.strip() if var.type == "number" else value
+        problems = pbk.value_problems(var, value)
+        if problems:
+            return StepResult(step.id, "input", status="failed", detail=f"That answer {problems[0]}.")
+        self._values[var.name] = value
+        if asked and keep and self._remember is not None:
+            try:
+                self._remember(var.name, str(value))
+            except Exception:                                  # failing to remember must never fail the run
+                pass
+        return StepResult(step.id, "input", approval="asked" if asked or step.id in self._answers else None)
 
     async def _handoff(self, step: Step) -> StepResult:
         """A step only a person can do (sign in, a CAPTCHA, typing a password). Attended: ask, and carry
@@ -487,8 +593,10 @@ class PlaybookPlayer:
                 return None
             await self._sleep(self.poll)
 
-    async def _act_step(self, step: Step, name: str, params: dict, matched: Optional[str] = None) -> StepResult:
-        result = await self.driver.act(name, params)
+    async def _act_step(self, step: Step, name: str, params: dict, matched: Optional[str] = None,
+                        tier: Optional[str] = None) -> StepResult:
+        # `tier` is passed only for a step that chose one, so a driver written before tiers existed keeps working
+        result = await (self.driver.act(name, params, tier=tier) if tier else self.driver.act(name, params))
         err = _result_error(result)
         if err:
             return self._failure(step, err, matched)
@@ -497,6 +605,8 @@ class PlaybookPlayer:
                          if self.approver.last in ("preapproved", "asked") else None)
         if name == "extract":
             out.output = str(getattr(result, "extracted_content", "") or "")
+            out.model = getattr(self.driver, "last_model", None)
+            out.tokens = getattr(self.driver, "last_tokens", None)
         return out
 
     def _failure(self, step: Step, err: str, matched: Optional[str]) -> StepResult:
@@ -538,7 +648,12 @@ class PlaybookPlayer:
             return
         if step.kind == "type":
             text = pbk.render(step.text, self._values) or ""
-            self._typed = "" if pbk.SECRET_RE.search(step.text or "") else text
+            if pbk.SECRET_RE.search(step.text or ""):
+                self._typed = ""
+            elif any(self._variables.get(n) is not None and self._variables[n].runtime for n in pbk.PLACEHOLDER_RE.findall(step.text or "")):
+                self._typed = "(what you typed in when asked)"        # an answer may be a code or a password: not shown again
+            else:
+                self._typed = text
         elif step.kind in ("open", "search", "click", "key", "tab", "back", "select"):
             self._typed = ""
 

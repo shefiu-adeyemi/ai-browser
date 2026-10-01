@@ -211,12 +211,12 @@ def _clean_one(key: str, value) -> Optional[str]:
     if len(text) > 2000:
         raise ValueError("is too long")
 
-    if key == "LLM_PROVIDER":
+    if key in ("LLM_PROVIDER", "LLM_FAST_PROVIDER", "LLM_STRONG_PROVIDER"):
         resolved = providers.resolve_provider_id(text)
         if resolved is None:
             raise ValueError("unknown provider; choose one of: " + ", ".join(p.id for p in providers.PROVIDERS))
         return resolved
-    if key == "LLM_MODEL":
+    if key in ("LLM_MODEL", "LLM_FAST_MODEL", "LLM_STRONG_MODEL"):
         model = providers.strip_model_prefix(text)
         if not _MODEL_RE.match(model):
             raise ValueError("is not a valid model name (letters, digits and . _ : / @ + - only)")
@@ -233,6 +233,10 @@ def _clean_one(key: str, value) -> Optional[str]:
         if len(text) > 200:
             raise ValueError("is too long")
         return text
+    if key == "LLM_ROUTER":
+        if text.lower() not in ("auto", "off"):
+            raise ValueError('must be "auto" or "off"')
+        return text.lower()
     if key == "MAX_STEPS":
         return _int_in(text, 1, 500, "Max steps")
     if key == "CONTEXT_TURNS":

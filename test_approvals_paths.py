@@ -85,6 +85,50 @@ class Broker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b.snapshot(), [])                   # and the prompt is cleaned up
         self.assertEqual(sent[-1]["type"], "approval_done")
 
+    async def test_a_typed_answer_comes_back_as_text(self):
+        b, sent = make_broker()
+        task = asyncio.create_task(b.ask_text("Code?", "from your phone", "https://x.com"))
+        await asyncio.sleep(0.01)
+        self.assertEqual((sent[0]["kind"], sent[0]["title"]), ("input", "Code?"))
+        self.assertTrue(b.resolve(sent[0]["id"], True, "123456"))
+        self.assertEqual(await task, "123456")
+
+    async def test_the_user_can_ask_for_a_typed_answer_to_be_remembered(self):
+        for ticked, expected in ((True, True), (False, False), ("true", False), (1, False), (None, False)):
+            b, sent = make_broker()
+            task = asyncio.create_task(b.ask_text("Code?"))
+            await asyncio.sleep(0.01)
+            b.resolve(sent[0]["id"], True, "123", ticked)
+            got = await task
+            self.assertEqual((str(got), got.remember), ("123", expected), ticked)         # only a real true counts
+
+    async def test_a_typed_answer_that_is_empty_declined_or_not_text_is_no_answer(self):
+        for allow, text in ((True, ""), (True, "   "), (False, "123"), (True, None), (True, 5)):
+            b, sent = make_broker()
+            task = asyncio.create_task(b.ask_text("Code?"))
+            await asyncio.sleep(0.01)
+            b.resolve(sent[0]["id"], allow, text)
+            self.assertIsNone(await task, (allow, text))
+
+    async def test_a_yes_cannot_stand_in_for_a_typed_answer(self):
+        b, sent = make_broker()
+        task = asyncio.create_task(b.ask_text("Code?"))
+        await asyncio.sleep(0.01)
+        b.resolve(sent[0]["id"], True)                                  # a click on a yes button, no text
+        self.assertIsNone(await task)
+
+    async def test_no_answer_nobody_there_or_stop_is_none_for_a_typed_question(self):
+        b, _ = make_broker(timeout=0.05)
+        self.assertIsNone(await b.ask_text("Code?"))
+        b, sent = make_broker(clients=False)
+        self.assertIsNone(await b.ask_text("Code?"))
+        self.assertEqual(sent, [])
+        b, _ = make_broker()
+        task = asyncio.create_task(b.ask_text("Code?"))
+        await asyncio.sleep(0.01)
+        b.cancel_all()
+        self.assertIsNone(await task)
+
     async def test_console_approver(self):
         c = ConsoleApprover()
         for typed, kind, expected in (("y", "approve", True), ("", "approve", False), ("no", "approve", False),
@@ -114,11 +158,17 @@ class Endpoint(unittest.TestCase):
         try:
             fut = loop.create_future()
             agent_ui._broker._pending["known"] = fut
+            for sneaky in ("false", "true", 1, "yes", [True], None):                       # none of these is a yes
+                other = loop.create_future()
+                agent_ui._broker._pending["sneaky"] = other
+                c.post("/approvals/sneaky", json={"allow": sneaky})
+                self.assertIs(other.result(), False, sneaky)
             r = c.post("/approvals/known", json={"allow": True})
             self.assertEqual(r.json(), {"ok": True})
             self.assertTrue(fut.result())
         finally:
             agent_ui._broker._pending.pop("known", None)
+            agent_ui._broker._pending.pop("sneaky", None)
             loop.close()
 
 

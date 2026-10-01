@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Pause, Pencil, Play, PlayCircle, Trash2 } from 'lucide-react'
 import type { LimitsInfo, QuietHours, ScheduleView } from '@/types'
-import { errText, formatWhen, readJson, reasonOf } from './shared'
+import { answerCheckpoint, errText, formatWhen, readJson, reasonOf, timeLeft } from './shared'
+import ValueAnswer from './ValueAnswer'
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   scheduled: { label: 'Scheduled', cls: 'bg-green-50 text-green-700' },
   running: { label: 'Running', cls: 'bg-blue-50 text-blue-700' },
   waiting: { label: 'Waiting', cls: 'bg-blue-50 text-blue-700' },
+  asking: { label: 'Needs your answer', cls: 'bg-amber-50 text-amber-700' },
   paused: { label: 'Paused', cls: 'bg-amber-50 text-amber-700' },
   off: { label: 'Off', cls: 'bg-gray-100 text-gray-600' },
   finished: { label: 'Finished', cls: 'bg-gray-100 text-gray-600' },
@@ -19,6 +21,7 @@ const LIMIT_LABEL: Record<string, string> = {
 
 function nextText(s: ScheduleView): string {
   if (s.status === 'paused') return s.paused_detail || 'Paused'
+  if (s.status === 'asking') return `${s.pending.length} question${s.pending.length === 1 ? '' : 's'} waiting for you`
   if (s.status === 'waiting') return `${s.remaining} waiting for tomorrow's allowance`
   if (s.status === 'running') return `${s.remaining} row${s.remaining === 1 ? '' : 's'} left`
   if (s.status === 'off') return 'Switched off'
@@ -80,6 +83,13 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
   const post = (url: string, body: unknown = {}, done?: string) =>
     call(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, done)
 
+  const answer = async (s: ScheduleView, runId: string, approve: boolean, value?: string, remember?: boolean) => {
+    const why = await answerCheckpoint(s.id, runId, approve, value, remember)
+    if (why) setError(why)
+    else notify(approve ? (value !== undefined ? `Thanks. "${s.name}" will carry on when it is its turn.` : `Approved. "${s.name}" will carry on when it is its turn.`) : 'Cancelled. Nothing was sent.')
+    await load()
+  }
+
   const [checking, setChecking] = useState(false)
   const checkSignIn = async () => {
     setChecking(true)
@@ -140,6 +150,29 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
                   </div>
                   <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${st.cls}`}>{st.label}</span>
                 </div>
+                {s.pending.map((q) => (
+                  <div key={q.run_id} className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+                    <p className="text-xs font-medium text-amber-900">{q.message}</p>
+                    {q.detail && <p className="mt-0.5 break-words text-xs text-amber-900/80">{q.detail}</p>}
+                    <img src={`/playbooks/${s.playbook_id}/runs/${q.run_id}/screenshot`} alt="The page at the question"
+                      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+                      className="mt-1.5 max-h-40 w-full rounded border border-amber-200 bg-white object-contain object-top" />
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-amber-800">
+                        {q.on_timeout === 'skip' ? `No answer within ${timeLeft(q.expires_at)} skips that step and carries on.` : `No answer within ${timeLeft(q.expires_at)} cancels it.`}
+                      </span>
+                      {q.kind !== 'input' && (
+                        <span className="flex gap-1.5">
+                          <button onClick={() => answer(s, q.run_id, false)} className="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-700">Don't</button>
+                          <button onClick={() => answer(s, q.run_id, true)} className="rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-white">Go ahead</button>
+                        </span>
+                      )}
+                    </div>
+                    {q.kind === 'input' && (
+                      <ValueAnswer label={`Answer for ${s.name}`} onSend={(v, keep) => answer(s, q.run_id, true, v, keep)} onCancel={() => answer(s, q.run_id, false)} />
+                    )}
+                  </div>
+                ))}
                 <div className="mt-2 flex items-center justify-end gap-1.5">
                   {confirming === s.id ? (
                     <>
@@ -156,7 +189,7 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
                       {s.status === 'paused' && (
                         <button onClick={() => post(`/schedules/${s.id}/resume`, {}, `Resumed "${s.name}".`)} className="rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800">Resume</button>
                       )}
-                      <button onClick={() => post(`/schedules/${s.id}/run-now`, {}, `Started "${s.name}" now.`)} disabled={s.status === 'running' || s.status === 'waiting' || s.status === 'paused'}
+                      <button onClick={() => post(`/schedules/${s.id}/run-now`, {}, `Started "${s.name}" now.`)} disabled={s.status === 'running' || s.status === 'waiting' || s.status === 'paused' || s.status === 'asking'}
                         className="inline-flex items-center gap-1 rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"><PlayCircle size={12} /> Run now</button>
                     </>
                   )}

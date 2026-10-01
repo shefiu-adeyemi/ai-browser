@@ -30,7 +30,7 @@ class Inbox(unittest.TestCase):
 
     def test_an_action_is_kept_only_if_it_is_a_known_plain_one(self):
         ok = self.store.add("warning", "Waiting", action={"type": "checkpoint", "schedule_id": "sch_x", "run_id": "run_y", "evil": "1"})
-        self.assertEqual(ok["action"], {"type": "checkpoint", "schedule_id": "sch_x", "run_id": "run_y"})
+        self.assertEqual(ok["action"], {"type": "checkpoint", "schedule_id": "sch_x", "run_id": "run_y", "kind": "approve"})
         self.assertEqual(NotificationStore(self.path).recent()[0]["action"], ok["action"])         # and it is saved
         for bad in (None, "x", {"type": "run-this", "schedule_id": "a", "run_id": "b"}, {"type": "checkpoint"},
                     {"type": "checkpoint", "schedule_id": "a"}):

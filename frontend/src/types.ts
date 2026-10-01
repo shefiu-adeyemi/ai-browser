@@ -72,6 +72,44 @@ export interface Settings {
   APPROVAL_MODE: string   // 'ask' | 'auto' (the server also allows 'off', hand-edited only)
   UNREADABLE?: string[]   // read-only: stored secrets this Windows account cannot decrypt
   PROVIDERS: ProviderInfo[]   // read-only: sent by the server, never saved back
+  LLM_FAST_PROVIDER: string   // '' = the Standard provider
+  LLM_FAST_MODEL: string
+  LLM_STRONG_PROVIDER: string
+  LLM_STRONG_MODEL: string
+  LLM_ROUTER: string          // 'auto' | 'off'
+  TIERS?: TiersInfo           // read-only: what each slot really resolves to
+}
+
+export type ModelTier = 'fast' | 'standard' | 'strong'
+
+export interface TierSlot {
+  provider: string
+  model: string
+  label: string
+  explicit: boolean
+  usable: boolean
+  collapsed: boolean
+  reason: string
+}
+
+export interface TiersInfo {
+  router: 'auto' | 'off'
+  slots: Record<'fast' | 'standard' | 'strong', TierSlot>
+  suggestions: Record<string, { fast: string; strong: string }>
+  purposes: { purpose: string; tier: 'fast' | 'standard' | 'strong'; label: string }[]
+}
+
+export interface ModelCost {
+  per_tier: Record<'fast' | 'standard' | 'strong', number>
+  total: number
+  unpriced_tokens: number
+}
+
+export type ModelPrices = Record<string, { in: number; out: number }>
+
+export interface ModelUsage {
+  range_days: number
+  totals: Record<'fast' | 'standard' | 'strong', { calls: number; prompt: number; completion: number }>
 }
 
 export type FormatOption = 'auto' | 'json' | 'bullets' | 'table'
@@ -79,7 +117,7 @@ export type FormatOption = 'auto' | 'json' | 'bullets' | 'table'
 // The agent is waiting for a person (approve/deny an action, or finish a manual step)
 export interface ApprovalRequest {
   id: string
-  kind: 'approve' | 'handoff'
+  kind: 'approve' | 'handoff' | 'input'
   title: string
   detail: string
   url: string
@@ -108,7 +146,7 @@ export interface PlaybookFingerprint {
 
 export interface PlaybookStep {
   id: string
-  kind: 'open' | 'search' | 'back' | 'click' | 'type' | 'select' | 'key' | 'scroll' | 'wait' | 'tab' | 'handoff' | 'approve' | 'extract' | 'ai'
+  kind: 'open' | 'search' | 'back' | 'click' | 'type' | 'select' | 'key' | 'scroll' | 'wait' | 'tab' | 'handoff' | 'approve' | 'input' | 'extract' | 'ai'
   tag: 'deterministic' | 'ai'
   note: string
   url?: string | null
@@ -121,6 +159,9 @@ export interface PlaybookStep {
   tab_index?: number | null
   close_tab?: boolean
   timeout_minutes?: number | null
+  on_timeout?: 'cancel' | 'skip' | null
+  variable?: string | null
+  tier?: ModelTier | null         // AI steps: which model tier reads the page (null = automatic)
   ask: boolean
   target?: PlaybookFingerprint | null
   [more: string]: unknown        // fields the screen doesn't show are passed back to the server untouched
@@ -132,6 +173,7 @@ export interface PlaybookVariable {
   label: string
   default?: string | null
   required: boolean
+  runtime?: boolean
   allowed_hosts: string[]
   [more: string]: unknown
 }
@@ -177,7 +219,7 @@ export type InputMessage =
 
 export interface PlaybookRunSummary {
   run_id: string
-  status: 'done' | 'failed' | 'needs_you' | 'stopped'
+  status: 'done' | 'failed' | 'needs_you' | 'stopped' | 'waiting' | 'declined' | 'expired' | 'cancelled'
   started_at: number
   finished_at: number
   seconds: number
@@ -198,6 +240,8 @@ export interface PlaybookStepResult {
   matched?: string | null
   approval?: string | null
   output?: string | null
+  model?: string | null          // which model read the page, e.g. "claude-haiku-4-5 (Fast)"
+  tokens?: number | null         // what that used (prompt + answer), when the model reported it
 }
 
 export interface PlaybookRunRecord extends Omit<PlaybookRunSummary, 'steps' | 'ok_steps'> {
@@ -256,6 +300,9 @@ export interface PendingQuestion {
   url: string
   parked_at: string
   expires_at: string
+  kind: 'approve' | 'input'
+  variable: string
+  on_timeout: 'cancel' | 'skip'
 }
 
 export interface Allowance { start: number; ceiling: number; ramp_per_week: number }
@@ -278,5 +325,5 @@ export interface NotificationItem {
   playbook_id: string
   run_id: string
   read: boolean
-  action?: { type: 'checkpoint'; schedule_id: string; run_id: string } | null
+  action?: { type: 'checkpoint'; schedule_id: string; run_id: string; kind?: 'approve' | 'input' } | null
 }

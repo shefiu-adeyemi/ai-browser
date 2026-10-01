@@ -36,10 +36,13 @@ PLAYBOOKS_DIR        = DATA_DIR / "playbooks"
 PLAYBOOK_RUNS_DIR    = DATA_DIR / "playbook_runs"
 SCHEDULES_FILE       = DATA_DIR / "schedules.json"
 SITE_LIMITS_FILE     = DATA_DIR / "site_limits.json"
+REMEMBERED_ANSWERS_FILE = DATA_DIR / "remembered_answers.json"
 NOTIFICATIONS_FILE   = DATA_DIR / "notifications.json"
 UI_PROFILE_DIR       = DATA_DIR / "profiles" / "ui"          # browser used by the web UI
 LINKEDIN_PROFILE_DIR = DATA_DIR / "profiles" / "linkedin"    # browser used by linkedin_agent.py
 LAST_URL_FILE        = DATA_DIR / "last_url"
+LLM_USAGE_FILE       = DATA_DIR / "llm_usage.json"        # tokens used per tier and model (model_tiers.py)
+LLM_PRICES_FILE      = DATA_DIR / "llm_prices.json"       # what the user says each model costs, for estimates (model_tiers.py)
 
 # (old location inside the project, new location)
 _LEGACY = [

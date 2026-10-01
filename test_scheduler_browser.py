@@ -53,7 +53,7 @@ class ScheduledRuns(LifecycleBase):
         self.sched = Scheduler(schedules=self.scheds, playbooks=self.pbs, limits=self.limits,
                                execute=agent_ui._execute_scheduled,
                                idle=lambda: not agent_ui._ctl.running and not agent_ui._ctl.paused,
-                               notify=agent_ui._notify_user)
+                               notify=agent_ui._notify_user, resolved=agent_ui._record_parked_end)
 
     async def send_button(self):
         session = await agent_ui._ensure_session()
@@ -136,6 +136,162 @@ class ScheduledRuns(LifecycleBase):
         data = self.runs.screenshot(pb.id, rec["run_id"])
         self.assertTrue(data and data[:2] == b"\xff\xd8", "a JPEG of the page")
         self.assertLess(len(data), 400_000)
+
+    async def candidates(self):
+        session = await agent_ui._ensure_session()
+        await session.navigate_to(self.url)
+        await asyncio.sleep(1.5)
+        state = await session.get_browser_state_summary(include_screenshot=False)
+        return {c.attributes.get("id"): c for c in candidates_from_selector_map(state.dom_state.selector_map)}
+
+    @staticmethod
+    def fingerprint(c, certain=True):
+        return pbk.Fingerprint(node_name=c.node_name, attributes={"id": c.attributes.get("id")} if certain else {},
+                               ax_name=c.ax_name, x_path=c.x_path if certain else "/somewhere/else",
+                               element_hash=c.element_hash if certain else "1", stable_hash=c.stable_hash if certain else "2")
+
+    async def parked_send(self, certain=True):
+        cands = await self.candidates()
+        steps = [pbk.Step(id="s1", kind="open", url=self.url),
+                 pbk.Step(id="s2", kind="type", target=self.fingerprint(cands["q"]), text="hello there"),
+                 pbk.Step(id="s3", kind="approve", message="Send this message?", timeout_minutes=60),
+                 pbk.Step(id="s4", kind="click", target=self.fingerprint(cands["send"], certain), ask=True)]
+        pb = self.pbs.save(pbk.refresh(pbk.Playbook(name="Guarded send", steps=steps)), approve=True)
+        s = self.schedule(pb)                                      # no blanket "allow" tick: the checkpoint is the guard
+        await self.session.navigate_to("about:blank")
+        rec = await self.finished_run(pb)
+        return pb, s, rec
+
+    async def title(self):
+        page = await self.session.get_current_page()
+        return await page.evaluate("() => document.title")
+
+    async def test_a_scheduled_send_waits_for_a_yes_then_sends_exactly_once(self):
+        pb, s, rec = await self.parked_send()
+        self.assertEqual(rec["status"], "waiting", rec)
+        self.assertEqual(rec["waiting"]["detail"], 'Typed just before: "hello there"')
+        self.assertTrue(rec["screenshot"])
+        self.assertEqual(self.runs.screenshot(pb.id, rec["run_id"])[:2], b"\xff\xd8")
+        self.assertNotEqual(await self.title(), "SENT", "it sent before anyone said yes")
+        self.assertFalse(agent_ui._ctl.running, "a waiting run must not hold the browser")
+        (job,) = self.scheds.get(s.id).state.parked
+        note = self.notes.recent()[0]
+        self.assertEqual(note["action"]["run_id"], rec["run_id"])
+        self.assertEqual([m for m in self.ws.msgs if m["type"] == "approval"], [], "nobody is asked while away: it parks")
+
+        self.assertEqual(await self.sched.answer(s.id, job.run_id, True), "")
+        self.limits.configure(gap={"min": 10, "jitter": 0})
+        self.limits._data["next_ok"] = {}
+        await self.sched.tick()
+        await until(lambda: not agent_ui._ctl.running, what="the answered run")
+        again = self.runs.get(pb.id, rec["run_id"])
+        self.assertEqual((again["status"], again["answered"]), ("done", ["s3"]))
+        self.assertEqual(again["steps"][2]["approval"], "asked")
+        self.assertEqual(again["steps"][3]["approval"], "preapproved")
+        self.assertEqual(await self.title(), "SENT")
+        self.assertEqual(len(self.runs.recent(pb.id)), 1)                          # one run in the history
+
+    async def test_a_no_never_sends(self):
+        pb, s, rec = await self.parked_send()
+        (job,) = self.scheds.get(s.id).state.parked
+        self.assertEqual(await self.sched.answer(s.id, job.run_id, False), "")
+        await self.sched.tick()
+        await asyncio.sleep(0.5)
+        self.assertNotEqual(await self.title(), "SENT")
+        self.assertEqual(self.runs.get(pb.id, rec["run_id"])["status"], "declined")
+
+    async def test_silence_never_sends(self):
+        pb, s, rec = await self.parked_send()
+        self.scheds.change_state(s.id, lambda st: st.model_copy(update={"parked": [
+            j.model_copy(update={"expires_at": sch.iso(datetime.now() - timedelta(minutes=1))}) for j in st.parked]}))
+        await self.sched.tick()
+        self.assertNotEqual(await self.title(), "SENT")
+        self.assertEqual(self.runs.get(pb.id, rec["run_id"])["status"], "expired")
+
+    async def typed_value(self):
+        page = await self.session.get_current_page()
+        return await page.evaluate("() => document.getElementById('q').value")
+
+    async def asking_for_text(self):
+        cands = await self.candidates()
+        steps = [pbk.Step(id="s1", kind="open", url=self.url),
+                 pbk.Step(id="s2", kind="input", message="What should be sent?", variable="msg", timeout_minutes=60),
+                 pbk.Step(id="s3", kind="type", target=self.fingerprint(cands["q"]), text="{{msg}}"),
+                 pbk.Step(id="s4", kind="approve", message="Send this message?", timeout_minutes=60),
+                 pbk.Step(id="s5", kind="click", target=self.fingerprint(cands["send"]), ask=True)]
+        pb = self.pbs.save(pbk.refresh(pbk.Playbook(name="Ask then send", variables=[pbk.Variable(name="msg", runtime=True)],
+                                                    steps=steps)), approve=True)
+        s = self.schedule(pb)
+        await self.session.navigate_to("about:blank")
+        return pb, s, await self.finished_run(pb)
+
+    async def next_turn(self):
+        self.limits._data["next_ok"] = {}
+        await self.sched.tick()
+        await until(lambda: not agent_ui._ctl.running, what="the next run")
+
+    async def test_a_value_typed_in_by_the_user_is_used_then_the_send_still_waits_for_its_own_yes(self):
+        pb, s, rec = await self.asking_for_text()
+        self.assertEqual((rec["status"], rec["waiting"]["kind"], rec["waiting"]["variable"]), ("waiting", "input", "msg"))
+        (job,) = self.scheds.get(s.id).state.parked
+        self.assertEqual(await self.sched.answer(s.id, job.run_id, True), "Type the answer first.")
+        self.assertEqual(await self.sched.answer(s.id, job.run_id, True, "hello from me"), "")
+        await self.next_turn()
+        again = self.runs.get(pb.id, rec["run_id"])
+        self.assertEqual((again["status"], again["waiting"]["kind"]), ("waiting", "approve"))     # now the send's own question
+        self.assertEqual(await self.typed_value(), "hello from me")
+        self.assertNotEqual(await self.title(), "SENT", "typing a value is not a yes to the send")
+        self.assertNotIn("hello from me", str(again), "the typed value must not be kept in the run record")
+        (job,) = self.scheds.get(s.id).state.parked
+        self.assertEqual(job.typed, ["s2"])                                    # carried to the next question
+        await self.sched.answer(s.id, job.run_id, True)
+        await self.next_turn()
+        self.assertEqual(await self.title(), "SENT")
+        self.assertEqual(self.runs.get(pb.id, rec["run_id"])["status"], "done")
+        self.assertEqual(self.scheds.get(s.id).state.parked, [])
+
+    async def test_no_value_means_nothing_is_typed_or_sent(self):
+        pb, s, rec = await self.asking_for_text()
+        (job,) = self.scheds.get(s.id).state.parked
+        self.scheds.change_state(s.id, lambda st: st.model_copy(update={"parked": [
+            j.model_copy(update={"expires_at": sch.iso(datetime.now() - timedelta(minutes=1))}) for j in st.parked]}))
+        await self.sched.tick()
+        self.assertEqual(self.runs.get(pb.id, rec["run_id"])["status"], "expired")
+        self.assertNotEqual(await self.title(), "SENT")
+        self.assertEqual(await self.typed_value(), "")
+
+    async def test_silence_on_a_step_set_to_skip_leaves_the_send_out_and_finishes_the_rest(self):
+        cands = await self.candidates()
+        steps = [pbk.Step(id="s1", kind="open", url=self.url),
+                 pbk.Step(id="s2", kind="type", target=self.fingerprint(cands["q"]), text="hello there"),
+                 pbk.Step(id="s3", kind="approve", message="Send this message?", timeout_minutes=60, on_timeout="skip"),
+                 pbk.Step(id="s4", kind="click", target=self.fingerprint(cands["send"]), ask=True),
+                 pbk.Step(id="s5", kind="wait", seconds=1)]
+        pb = self.pbs.save(pbk.refresh(pbk.Playbook(name="Skippable send", steps=steps)), approve=True)
+        s = self.schedule(pb)
+        await self.session.navigate_to("about:blank")
+        rec = await self.finished_run(pb)
+        self.assertEqual((rec["status"], rec["waiting"]["on_timeout"], rec["waiting"]["guarded"]), ("waiting", "skip", "s4"))
+        self.scheds.change_state(s.id, lambda st: st.model_copy(update={"parked": [
+            j.model_copy(update={"expires_at": sch.iso(datetime.now() - timedelta(minutes=1))}) for j in st.parked]}))
+        await self.sched.tick()                                                  # silence: moved on, not cancelled
+        await self.next_turn()
+        end = self.runs.get(pb.id, rec["run_id"])
+        self.assertEqual(end["status"], "done", end)
+        self.assertNotEqual(await self.title(), "SENT", "a skipped send was sent")
+        self.assertEqual(await self.typed_value(), "hello there")                # the steps before it did run
+        self.assertEqual(end["steps"][4]["status"], "ok")                        # and the one after it
+        self.assertTrue(any(n["title"].startswith("Skipped one step") for n in self.notes.recent()))
+
+    async def test_a_yes_does_not_excuse_an_unsure_match(self):
+        pb, s, rec = await self.parked_send(certain=False)
+        (job,) = self.scheds.get(s.id).state.parked
+        await self.sched.answer(s.id, job.run_id, True)
+        self.limits._data["next_ok"] = {}
+        await self.sched.tick()
+        await until(lambda: not agent_ui._ctl.running, what="the answered run")
+        self.assertNotEqual(await self.title(), "SENT", "pressed Send on an element it was not sure about")
+        self.assertEqual(self.runs.get(pb.id, rec["run_id"])["status"], "needs_you")
 
     async def test_a_user_task_in_progress_is_not_interrupted(self):
         pb = self.pbs.save(pbk.refresh(pbk.Playbook(name="Open the form", steps=[

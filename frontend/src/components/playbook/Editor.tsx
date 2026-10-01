@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Trash2, ShieldCheck, Sparkles, MousePointerClick, RotateCcw } from 'lucide-react'
-import type { Playbook, VariableSuggestion } from '@/types'
-import { KIND_LABEL, errText, readJson, stepDetail, stepTarget, usedVariables, reasonOf } from './shared'
+import type { ModelTier, Playbook, PlaybookStep, TiersInfo, VariableSuggestion } from '@/types'
+import { KIND_LABEL, TIER_LABEL, askForText, askedVariable, autoTier, errText, fetchTiers, isGuarded, readJson, stepDetail, tierModelText, stepTarget, stopAskingForText, usedVariables, reasonOf } from './shared'
 
 interface Props {
   /** 'draft': the last finished run, not stored until saved. 'edit': a saved playbook. */
@@ -16,6 +16,9 @@ interface Props {
  * The review screen. Both ways in end here: saving a finished run (nothing is stored until Save) and
  * changing a playbook that is already saved (name, steps, inputs, approval, older versions).
  */
+/** The job a model step does, as the router names it (so the screen can say which tier "automatic" means). */
+const purposeOf = (s: PlaybookStep) => (s.kind === 'extract' ? 'playbook_extract' : 'agent')
+
 export default function Editor({ mode, id, onCancel, onSaved }: Props) {
   const [pb, setPb] = useState<Playbook | null>(null)
   const [suggestions, setSuggestions] = useState<VariableSuggestion[]>([])
@@ -27,6 +30,9 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
   const [approve, setApprove] = useState(false)
   const [changed, setChanged] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [tiers, setTiers] = useState<TiersInfo | null>(null)
+  const [remembered, setRemembered] = useState<string[]>([])      // typed answers kept for later runs (names only)
+  const askedText = useRef<Record<string, string>>({})        // what a step typed before it was turned into a question
 
   const load = async () => {
     try {
@@ -49,6 +55,21 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
   }
 
   useEffect(() => { load() }, [mode, id])      // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchTiers().then(setTiers) }, [])
+  useEffect(() => {
+    if (mode !== 'edit' || !id) { setRemembered([]); return }
+    fetch(`/playbooks/${id}/remembered`).then(readJson).then((d) => setRemembered(Array.isArray(d.variables) ? d.variables : [])).catch(() => setRemembered([]))
+  }, [mode, id])
+  const forget = async (name: string) => {
+    try {
+      const res = await fetch(`/playbooks/${id}/remembered/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      const data = await readJson(res)
+      if (!res.ok || !data.ok) { setProblems([reasonOf(res, data)]); return }
+      setRemembered((r) => r.filter((n) => n !== name))
+    } catch (e) {
+      setProblems([`Couldn't forget it (${errText(e)}).`])
+    }
+  }
 
   if (loadError) {
     return (
@@ -87,8 +108,51 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
   }
 
   const removeStep = (stepId: string) => {
+    const gone = pb.steps.find((s) => s.id === stepId)
+    if (gone?.kind === 'input' && gone.variable) {          // deleting the question puts the typed text back
+      const typer = pb.steps.find((s) => s.kind === 'type' && s.text === `{{${gone.variable}}}`)
+      stepsChanged(stopAskingForText(pb, gone.variable, (typer && askedText.current[typer.id]) || ''))
+      return
+    }
     const steps = pb.steps.filter((s) => s.id !== stepId)
     stepsChanged({ ...pb, steps, variables: usedVariables(steps, pb.variables) })
+  }
+
+  // "Ask me each time": put an approve step right before a risky step (or take it away again).
+  const toggleGuard = (index: number) => {
+    const step = pb.steps[index]
+    if (isGuarded(pb.steps, index)) {
+      stepsChanged({ ...pb, steps: pb.steps.filter((_, i) => i !== index - 1) })
+      return
+    }
+    const nums = pb.steps.map((s) => Number(s.id.slice(1))).filter((n) => !Number.isNaN(n))
+    const id = `s${Math.max(0, ...nums) + 1}`
+    const label = stepTarget(step) || step.note || 'this step'
+    const guard: PlaybookStep = { id, kind: 'approve', tag: 'deterministic', note: '', message: `Run "${label}"?`, ask: false }
+    stepsChanged({ ...pb, steps: [...pb.steps.slice(0, index), guard, ...pb.steps.slice(index)] })
+  }
+
+  // "Ask me for this text each run": the text is typed in when the run gets there, not stored in the playbook.
+  const toggleAsk = (index: number) => {
+    const step = pb.steps[index]
+    const name = askedVariable(step)
+    if (name) {
+      stepsChanged(stopAskingForText(pb, name, askedText.current[step.id] ?? ''))
+      return
+    }
+    const { playbook, original } = askForText(pb, index)
+    askedText.current[step.id] = original
+    stepsChanged(playbook)
+  }
+
+  const editStep = (id: string, patch: Partial<PlaybookStep>) => {
+    stepsChanged({ ...pb, steps: pb.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) })
+  }
+
+  // Which model tier reads the page changes what a run costs, not what it does, so the approval stays.
+  const setTier = (stepId: string, tier: ModelTier | '') => {
+    setPb({ ...pb, steps: pb.steps.map((s) => (s.id === stepId ? { ...s, tier: tier || null } : s)) })
+    setChanged(true)
   }
 
   const editVariable = (name: string, patch: Record<string, unknown>) => {
@@ -166,7 +230,9 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
                   {stepTarget(s) && (
                     <span className="inline-flex items-center gap-1 text-xs text-gray-600"><MousePointerClick size={11} />{stepTarget(s)}</span>
                   )}
-                  {s.tag === 'ai' ? (
+                  {s.kind === 'approve' || s.kind === 'input' ? (
+                    <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">you answer</span>
+                  ) : s.tag === 'ai' ? (
                     <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-1.5 py-0.5 text-[10px] font-medium text-purple-700"><Sparkles size={10} />AI</span>
                   ) : s.kind === 'handoff' ? (
                     <span className="rounded-full bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">you do this</span>
@@ -177,7 +243,64 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
                     <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-700" title="Reaches other people or can't be undone">needs approval</span>
                   )}
                 </div>
-                {stepDetail(s) && <p className="mt-0.5 break-all text-xs text-gray-500">{stepDetail(s)}</p>}
+                {s.kind === 'approve' || s.kind === 'input' ? (
+                  <div className="mt-1 space-y-1">
+                    <input aria-label={`Question for step ${i + 1}`} value={s.message ?? ''} maxLength={500}
+                      onChange={(e) => editStep(s.id, { message: e.target.value })}
+                      className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs focus:border-brand focus:outline-none" />
+                    <label className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                      If nobody answers within
+                      <select aria-label={`Wait for step ${i + 1}`} value={s.timeout_minutes ?? 1440}
+                        onChange={(e) => editStep(s.id, { timeout_minutes: Number(e.target.value) })}
+                        className="rounded border border-gray-300 px-1 py-0.5 text-[11px]">
+                        <option value={60}>1 hour</option><option value={360}>6 hours</option>
+                        <option value={1440}>1 day</option><option value={4320}>3 days</option><option value={10080}>7 days</option>
+                      </select>
+                      {s.kind === 'input' ? 'the run is cancelled.' : isGuarded(pb.steps, i + 1) ? (
+                        <select aria-label={`When nobody answers for step ${i + 1}`} value={s.on_timeout ?? 'cancel'}
+                          onChange={(e) => editStep(s.id, { on_timeout: e.target.value as 'cancel' | 'skip' })}
+                          className="rounded border border-gray-300 px-1 py-0.5 text-[11px]">
+                          <option value="cancel">cancel the run, nothing is sent</option>
+                          <option value="skip">skip that step and carry on</option>
+                        </select>
+                      ) : 'it is cancelled, never sent.'}
+                    </label>
+                  </div>
+                ) : (
+                  stepDetail(s) && <p className="mt-0.5 break-all text-xs text-gray-500">{stepDetail(s)}</p>
+                )}
+                {s.tag === 'ai' && (
+                  <div className="mt-1 text-[11px] text-gray-600">
+                    <label className="flex flex-wrap items-center gap-1.5">
+                      Model
+                      <select aria-label={`Model tier for step ${i + 1}`} value={s.tier ?? ''} disabled={tiers?.router === 'off'}
+                        onChange={(e) => setTier(s.id, e.target.value as ModelTier | '')}
+                        className="rounded border border-gray-300 px-1 py-0.5 text-[11px] disabled:opacity-60">
+                        <option value="">{tiers ? `Automatic (${TIER_LABEL[autoTier(tiers, purposeOf(s))]})` : 'Automatic'}</option>
+                        <option value="fast">Fast, cheapest</option>
+                        <option value="standard">Standard</option>
+                        <option value="strong">Strong, most capable</option>
+                      </select>
+                    </label>
+                    <p className="mt-0.5 text-gray-400">
+                      {s.tier
+                        ? `${TIER_LABEL[s.tier]}: ${tierModelText(tiers, s.tier)}. Only this tier is used, even if it fails.`
+                        : tiers ? `${TIER_LABEL[autoTier(tiers, purposeOf(s))]} first (${tierModelText(tiers, autoTier(tiers, purposeOf(s)))}), then a stronger one only if it fails.` : ''}
+                    </p>
+                  </div>
+                )}
+                {s.kind === 'type' && (
+                  <label className="mt-1 flex items-center gap-1.5 text-[11px] text-gray-600">
+                    <input type="checkbox" checked={askedVariable(s) !== null} onChange={() => toggleAsk(i)} />
+                    Ask me for this text each time this runs
+                  </label>
+                )}
+                {s.ask && (
+                  <label className="mt-1 flex items-center gap-1.5 text-[11px] text-gray-600">
+                    <input type="checkbox" checked={isGuarded(pb.steps, i)} onChange={() => toggleGuard(i)} />
+                    Ask me each time this runs
+                  </label>
+                )}
               </div>
               <button aria-label={`Remove step ${i + 1}`} onClick={() => removeStep(s.id)} className="flex-shrink-0 rounded p-1 text-gray-300 hover:bg-gray-100 hover:text-red-600">
                 <Trash2 size={13} />
@@ -186,11 +309,26 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
           ))}
         </ol>
 
-        {pb.variables.length > 0 && (
+        {remembered.length > 0 && (
+          <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            <p className="font-medium text-gray-700">Answers kept for next runs</p>
+            <p className="text-[11px] text-gray-500">These questions are not asked again until you forget the answer. They are saved on this computer.</p>
+            <ul className="mt-1 space-y-1">
+              {remembered.map((n) => (
+                <li key={n} className="flex items-center justify-between gap-2">
+                  <span className="font-mono">{n}</span>
+                  <button onClick={() => forget(n)} aria-label={`Forget ${n}`} className="rounded-md border border-gray-300 px-2 py-0.5 text-[11px] text-gray-700 hover:text-red-600">Forget</button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {pb.variables.some((v) => !v.runtime) && (
           <div>
             <p className="text-xs font-medium text-gray-700">Inputs you will fill in each time</p>
             <ul className="mt-1 space-y-2">
-              {pb.variables.map((v) => (
+              {pb.variables.filter((v) => !v.runtime).map((v) => (
                 <li key={v.name} className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
                   <p><span className="font-mono">{v.name}</span> ({v.type.replace('_', ' ')})</p>
                   {mode === 'edit' ? (

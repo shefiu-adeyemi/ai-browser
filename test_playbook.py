@@ -203,7 +203,7 @@ class ApproveStep(unittest.TestCase):
         self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve"), Step(id="s2", kind="back"))))
         self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve", message="  "), Step(id="s2", kind="back"))))
         probs = pbk.validate(self.pb(Step(id="s1", kind="back"), Step(id="s2", kind="approve", message="m")))
-        self.assertTrue(any("BEFORE the step it guards" in p for p in probs), probs)
+        self.assertTrue(any("BEFORE the step it is about" in p for p in probs), probs)
         self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="approve", message="m"))))     # alone, so last
 
     def test_the_message_may_use_the_inputs_but_not_secrets(self):
@@ -245,6 +245,104 @@ class ApproveStep(unittest.TestCase):
         self.assertFalse(pbk.is_approved(without))
         reworded = with_cp.model_copy(update={"steps": [with_cp.steps[0].model_copy(update={"timeout_minutes": 10}), with_cp.steps[1]]})
         self.assertFalse(pbk.is_approved(reworded))                              # a shorter wait is a different promise
+
+
+class SkipOnTimeout(unittest.TestCase):
+    def pb(self, *steps):
+        return Playbook(name="x", steps=list(steps))
+
+    def test_skip_is_fine_in_front_of_a_step_that_needs_approval(self):
+        pb = self.pb(Step(id="s1", kind="approve", message="Send?", on_timeout="skip"),
+                     Step(id="s2", kind="click", target=Fingerprint(node_name="button", ax_name="Send"), ask=True))
+        self.assertEqual(pbk.validate(pb), [])
+
+    def test_skip_is_refused_when_the_next_step_is_not_one_that_needs_approval(self):
+        for nxt in (Step(id="s2", kind="wait", seconds=1),
+                    Step(id="s2", kind="click", target=Fingerprint(node_name="button", ax_name="Next"))):
+            problems = pbk.validate(self.pb(Step(id="s1", kind="approve", message="Send?", on_timeout="skip"), nxt))
+            self.assertTrue(any("skip and carry on" in p for p in problems), problems)
+
+    def test_cancel_needs_nothing_special(self):
+        pb = self.pb(Step(id="s1", kind="approve", message="Send?", on_timeout="cancel"), Step(id="s2", kind="wait", seconds=1))
+        self.assertEqual(pbk.validate(pb), [])
+
+
+class InputStep(unittest.TestCase):
+    """A value a person types DURING the run (a runtime variable), and what to do when nobody answers."""
+    def pb(self, *steps, variables=None):
+        return Playbook(name="x", variables=variables if variables is not None else [Variable(name="code", runtime=True)],
+                        steps=list(steps))
+
+    def fp(self): return Fingerprint(node_name="input", ax_name="Code")
+
+    def good(self):
+        return self.pb(Step(id="s1", kind="open", url="https://a.com/"),
+                       Step(id="s2", kind="input", message="What is the code?", variable="code", timeout_minutes=30),
+                       Step(id="s3", kind="type", target=self.fp(), text="{{code}}"))
+
+    def test_a_good_one(self):
+        self.assertEqual(pbk.validate(self.good()), [])
+        self.assertEqual([v.name for v in pbk.runtime_variables(self.good())], ["code"])
+
+    def test_it_needs_a_message_a_variable_and_a_step_after_it(self):
+        v = [Variable(name="code", runtime=True)]
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="input", variable="code"), Step(id="s2", kind="back"), variables=v)))
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="input", message="m"), Step(id="s2", kind="back"), variables=v)))
+        last = self.pb(Step(id="s1", kind="back"), Step(id="s2", kind="input", message="m", variable="code"), variables=v)
+        self.assertTrue(any("can't be last" in p for p in pbk.validate(last)))
+
+    def test_the_variable_must_be_a_runtime_one_that_exists(self):
+        steps = (Step(id="s1", kind="input", message="m", variable="code"), Step(id="s2", kind="back"))
+        self.assertTrue(any("not a variable" in p for p in pbk.validate(self.pb(*steps, variables=[]))))
+        probs = pbk.validate(self.pb(*steps, variables=[Variable(name="code")]))
+        self.assertTrue(any("given when the run starts" in p for p in probs), probs)
+
+    def test_a_runtime_variable_needs_exactly_one_step_that_asks_for_it(self):
+        none = self.pb(Step(id="s1", kind="back"), variables=[Variable(name="code", runtime=True)])
+        self.assertTrue(any("no step asks for it" in p for p in pbk.validate(none)))
+        twice = self.pb(Step(id="s1", kind="input", message="a", variable="code"), Step(id="s2", kind="input", message="b", variable="code"),
+                        Step(id="s3", kind="back"))
+        self.assertTrue(any("asked for twice" in p for p in pbk.validate(twice)))
+
+    def test_it_cannot_be_used_before_it_is_asked(self):
+        early = self.pb(Step(id="s1", kind="type", target=self.fp(), text="{{code}}"),
+                        Step(id="s2", kind="input", message="m", variable="code"), Step(id="s3", kind="back"))
+        self.assertTrue(any("before the step that asks for it" in p for p in pbk.validate(early)))
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="input", message="Code {{code}}?", variable="code"),
+                                             Step(id="s2", kind="back"))))             # not even in its own question
+
+    def test_only_text_or_a_number_can_be_typed_during_a_run(self):
+        for t in ("url", "linkedin_url"):
+            v = Variable(name="code", type=t, runtime=True, allowed_hosts=["a.com"])
+            probs = pbk.validate(self.pb(Step(id="s1", kind="input", message="m", variable="code"), Step(id="s2", kind="back"), variables=[v]))
+            self.assertTrue(any("only be text or a number" in p for p in probs), t)
+
+    def test_runtime_variables_are_not_asked_for_at_the_start(self):
+        pb = self.good()
+        self.assertEqual(pbk.bind_values(pb, {}), ({}, []))                               # nothing required up front
+        _values, errors = pbk.bind_values(pb, {"code": "123456"})
+        self.assertTrue(any("answered while the run is going" in e for e in errors))
+
+    def test_the_wait_and_the_timeout_choice(self):
+        ok = self.pb(Step(id="s1", kind="approve", message="m", on_timeout="skip"), Step(id="s2", kind="click", target=self.fp(), ask=True), variables=[])
+        self.assertEqual(pbk.validate(ok), [])
+        for bad in (Step(id="s1", kind="back", on_timeout="skip"),
+                    Step(id="s1", kind="input", message="m", variable="code", on_timeout="skip")):
+            self.assertTrue(pbk.validate(self.pb(bad, Step(id="s2", kind="back"))), bad.kind)
+        with self.assertRaises(Exception):
+            Step(id="s1", kind="approve", message="m", on_timeout="go ahead")             # silence is never a yes
+
+    def test_the_choices_are_part_of_the_approval(self):
+        a = pbk.with_approval(pbk.refresh(self.pb(Step(id="s1", kind="approve", message="m"), Step(id="s2", kind="back"), variables=[])))
+        b = a.model_copy(update={"steps": [a.steps[0].model_copy(update={"on_timeout": "skip"}), a.steps[1]]})
+        self.assertFalse(pbk.is_approved(b))
+        c = pbk.with_approval(pbk.refresh(self.good()))
+        d = c.model_copy(update={"variables": [c.variables[0].model_copy(update={"runtime": False})]})
+        self.assertFalse(pbk.is_approved(d))                                              # who supplies a value is part of the promise
+
+    def test_a_secret_cannot_be_the_question(self):
+        self.assertTrue(pbk.validate(self.pb(Step(id="s1", kind="input", message="Use <secret>pw</secret>?", variable="code"),
+                                             Step(id="s2", kind="back"))))
 
 
 class HashesAreText(unittest.TestCase):
