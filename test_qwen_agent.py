@@ -50,5 +50,30 @@ class Vision(unittest.TestCase):
         self.assertTrue(agent_ui._judge_enabled("qwen", True))
 
 
+class RetryEscalation(unittest.TestCase):
+    """A retry may move the run to the Strong model, but never a screenshot-using run to a model that can't see."""
+    def escalate(self, uses_vision, strong_provider, strong_model):
+        pick = SimpleNamespace(slot=SimpleNamespace(collapsed=False, model=strong_model), provider_id=strong_provider)
+        stronger = SimpleNamespace(model=strong_model)
+        agent = SimpleNamespace(llm=SimpleNamespace(model="other"), settings=SimpleNamespace(use_vision=uses_vision),
+                                token_cost_service=mock.Mock())
+        router = mock.Mock(pick=mock.Mock(return_value=pick), llm=mock.Mock(return_value=stronger))
+        with mock.patch.object(agent_ui.model_tiers, "router_on", return_value=True), mock.patch.object(agent_ui, "_router", router):
+            return agent_ui._escalate_for_retry(agent), agent
+
+    def test_a_text_only_strong_model_is_not_used_by_a_run_that_looks_at_screenshots(self):
+        switched, agent = self.escalate(True, "qwen", "qwen3.7-max")
+        self.assertIsNone(switched)
+        self.assertEqual(agent.llm.model, "other")
+
+    def test_a_strong_model_that_sees_is_used(self):
+        switched, agent = self.escalate(True, "qwen", "qwen3.7-plus")
+        self.assertEqual((switched, agent.llm.model), ("qwen3.7-plus", "qwen3.7-plus"))
+
+    def test_a_run_without_screenshots_may_use_any_strong_model(self):
+        switched, _ = self.escalate(False, "qwen", "qwen3.7-max")
+        self.assertEqual(switched, "qwen3.7-max")
+
+
 if __name__ == "__main__":
     unittest.main()

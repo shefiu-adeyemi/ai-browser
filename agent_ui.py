@@ -405,7 +405,7 @@ def _escalate_for_retry(agent: Agent) -> str | None:
         if pick.slot.collapsed or pick.provider_id == "deepseek":
             return None
         # An agent that works from screenshots must not be handed to a model that can't take them.
-        if getattr(agent.settings, "use_vision", False) and not supports_vision(pick.provider_id, pick.slot.model):
+        if getattr(getattr(agent, "settings", None), "use_vision", False) and not supports_vision(pick.provider_id, pick.slot.model):
             return None
         stronger = _router.llm("retry")
         if stronger.model == agent.llm.model:
@@ -483,6 +483,8 @@ async def _run_one(task: str, llm, session: BrowserSession, fmt: str, max_steps:
         agent = _new_agent(_wrap_task(_augment_task(first), fmt, context), task, llm, session, sensitive_data,
                            provider=provider, pinned=tier is not None)
 
+    global _active_agent
+    _active_agent = agent
     step_limit = agent.history.number_of_steps() + max_steps
     history = await agent.run(max_steps=max_steps)
     retries = 0
@@ -527,10 +529,49 @@ async def _persist(verdict: str | None = None, duration: float | None = None) ->
                                   "It will be lost when the app closes."})
 
 
+_active_agent: Agent | None = None     # the agent of the run in progress, so a Stop can still say what it had found
+
+
+def _progress_report(agent: Agent | None) -> str:
+    """What a run had gathered when it was stopped, so stopping never throws the work away. Built from the agent's
+    own notes (the results file it keeps) and the longest things it read from pages; no extra model call."""
+    if agent is None:
+        return ""
+    try:
+        steps = agent.history.number_of_steps()
+        if steps < 1:
+            return ""
+        parts: list[str] = []
+        try:
+            notes = agent.file_system.display_file("results.md")
+        except Exception:
+            notes = None
+        if notes and notes.strip():
+            parts.append(notes.strip()[:4000])
+        else:
+            read = [t.strip() for t in agent.history.extracted_content() if t and len(t.strip()) > 80]
+            parts += [t[:600] for t in read[-3:]]
+        if not parts:
+            return ""
+        gap = chr(10) * 2
+        return f"Stopped after {steps} steps. Here is what it had found so far:{gap}" + gap.join(parts)
+    except Exception:
+        _log.exception("could not build the progress report for a stopped run")
+        return ""
+
+
 async def _record_stopped() -> None:
+    global _active_agent
     # A Stop can land just AFTER the run recorded its answer (in its last few awaits). Then the
     # transcript is already complete; adding "(stopped)" would leave two agent turns in a row.
-    if not _conversation_history or _conversation_history[-1].get("role") != "agent":
+    answered = bool(_conversation_history) and _conversation_history[-1].get("role") == "agent"
+    agent, _active_agent = _active_agent, None
+    if not answered:
+        report = _progress_report(agent)
+        if report:
+            _conversation_history.append({"role": "agent", "content": report, "ts": datetime.now().strftime("%H:%M")})
+            await _broadcast({"type": "result", "text": report, "verdict": "unknown", "reason": "",
+                              "retries": 0, "duration": 0})
         _conversation_history.append({"role": "agent", "content": "(stopped by user)",
                                        "ts": datetime.now().strftime("%H:%M")})
     await _persist()
@@ -588,7 +629,7 @@ async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: boo
     """One agent run. Started/stopped only through _ctl (see task_control.py), which owns the
     running/paused flags, so this function never sets them and never touches the browser's
     lifetime."""
-    global _paused_agent, _last_run
+    global _paused_agent, _last_run, _active_agent
     if max_steps <= 0:
         max_steps = _as_int(os.getenv("MAX_STEPS"), 60, low=1, high=500)
 
@@ -627,6 +668,7 @@ async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: boo
         _paused_agent = None            # a new request, or the one being resumed, leaves the paused slot
         outcome, agent = await _run_one(task, llm, session, fmt, max_steps, context,
                                         resume=resume, resume_agent=resume_agent, provider=provider, tier=tier)
+        _active_agent = None            # it finished: nothing left for a Stop to report on
         _record_agent_usage(agent)
         duration = round((datetime.now() - started).total_seconds(), 1)
 

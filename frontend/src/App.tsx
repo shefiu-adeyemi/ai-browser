@@ -501,6 +501,16 @@ export default function App() {
     }
   }, [approval])
 
+  // A run that used all its steps waits for the user's Continue or Stop: say so in the tab title.
+  useEffect(() => {
+    if (status !== 'paused') return
+    const original = document.title
+    document.title = '⏸ Paused — ' + original
+    return () => {
+      document.title = original
+    }
+  }, [status])
+
   // Find current step count from pending agent turn
   const pendingTurn = messages.find((m) => m.pending)
   const currentStep = pendingTurn?.stepCount ?? 0

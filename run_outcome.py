@@ -68,6 +68,12 @@ def assess(history: Any, step_limit: int) -> Outcome:
     if history.is_done():
         judgement = history.judgement()            # dict from browser-use's judge, or None
         claimed = history.is_successful()          # what the agent said about itself
+        # browser-use tells the agent on its LAST step to wrap up, so a run that used its whole budget still
+        # "finishes" with a done() that is really a progress report ("I could not reach 25 within the
+        # steps"). That is a pause the user can Continue, not a completed task. Only a reviewer's explicit
+        # pass counts as complete when every step was used.
+        if steps >= step_limit and not (judgement is not None and judgement.get("verdict")):
+            return Outcome("limit", result, "unknown", "", steps, claimed_success=claimed)
         if judgement is not None:
             verdict = "pass" if judgement.get("verdict") else "fail"
             reason = _tidy(judgement.get("failure_reason") or judgement.get("reasoning") or "", 600)

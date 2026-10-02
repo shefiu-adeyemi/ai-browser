@@ -49,6 +49,22 @@ class Assess(unittest.TestCase):
         self.assertEqual(o.status, "limit")
         self.assertEqual(assess(History(steps=61, done=False), 60).status, "limit")   # browser-use's forced last step
 
+    def test_a_final_report_given_on_the_last_step_is_still_a_pause(self):
+        """browser-use makes the agent wrap up on its last step, so running out of steps usually ends with a done()
+        that is a progress report. The user must get the Continue prompt, not a 'finished' task."""
+        for success in (True, False, None):
+            o = assess(History(steps=60, done=True, success=success, result="5 of 25 so far"), step_limit=60)
+            self.assertEqual((o.status, o.result), ("limit", "5 of 25 so far"), success)
+        self.assertEqual(assess(History(steps=60, done=True, success=False, judgement=FAIL, result="x"), 60).status, "limit")
+
+    def test_finishing_on_the_last_step_counts_only_if_the_reviewer_says_it_is_done(self):
+        o = assess(History(steps=60, done=True, success=True, judgement=PASS, result="42"), 60)
+        self.assertEqual((o.status, o.verdict), ("done", "pass"))
+
+    def test_finishing_before_the_limit_is_unchanged(self):
+        o = assess(History(steps=59, done=True, success=False, result="gave up"), 60)
+        self.assertEqual((o.status, o.verdict), ("done", "fail"))              # it chose to stop: not a pause
+
     def test_a_run_that_only_errored_is_a_failure_with_the_real_error(self):
         """The old code called this 'empty answer, 2/10' and retried it twice."""
         errs = [None, "Failed to get model output: 401 invalid x-api-key", "401 invalid x-api-key", "401 invalid x-api-key"]
