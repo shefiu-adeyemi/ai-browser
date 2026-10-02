@@ -19,7 +19,9 @@ Built on [browser-use](https://github.com/browser-use/browser-use) with a FastAP
    `qwen3.7-plus`, a multimodal model that sees screenshots at a fraction of the big models' price. Its key
    belongs to one region: international keys work out of the box; for a mainland-China key set `QWEN_BASE_URL`
    (see `.env.example`). DeepSeek and text-only Qwen models work from the page's text and elements instead of
-   screenshots, and the end-of-run check is off for them.
+   screenshots, and the end-of-run check is off for them. Settings has a **"This model can see screenshots"** tick
+   box under the model: it is set automatically from the model's name, and you can overrule it (for a model the app
+   doesn't know, or one you know differs).
    Optional: under **Model tiers** set a cheaper Fast model and a Strong model; unset slots use your chosen model. You can pick a tier per task (next to the task box) and per page-reading step of a playbook.
 
 Your keys and browser profiles are stored **outside this folder**, in

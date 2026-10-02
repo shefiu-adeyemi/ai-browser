@@ -88,6 +88,38 @@ class Qwen(unittest.TestCase):
         self.assertIn("QWEN_API_KEY", str(cm.exception))
 
 
+class VisionOverride(unittest.TestCase):
+    """The user's tick box beats the app's guess, for the Standard model only."""
+    def sees(self, provider, model=None, **env):
+        with mock.patch.dict(os.environ, {"LLM_PROVIDER": "", "LLM_MODEL": "", "LLM_VISION": "", **env}):
+            return llm_config.supports_vision(provider, model)
+
+    def test_the_user_can_turn_vision_off_for_a_model_that_sees(self):
+        self.assertTrue(self.sees("claude", None))
+        self.assertFalse(self.sees("claude", None, LLM_PROVIDER="claude", LLM_VISION="0"))
+        self.assertFalse(self.sees("qwen", "qwen3.7-plus", LLM_PROVIDER="qwen", LLM_VISION="0"))
+
+    def test_the_user_can_turn_vision_on_for_a_model_the_app_does_not_know(self):
+        self.assertFalse(self.sees("qwen", "my-new-model", LLM_PROVIDER="qwen", LLM_MODEL="my-new-model"))
+        self.assertTrue(self.sees("qwen", "my-new-model", LLM_PROVIDER="qwen", LLM_MODEL="my-new-model", LLM_VISION="1"))
+        self.assertTrue(self.sees("deepseek", "deepseek-v4-pro", LLM_PROVIDER="deepseek", LLM_VISION="1"))
+
+    def test_it_only_applies_to_the_standard_model(self):
+        env = dict(LLM_PROVIDER="deepseek", LLM_VISION="1")
+        self.assertFalse(self.sees("qwen", "qwen3.7-max", **env))               # another provider: automatic
+        env = dict(LLM_PROVIDER="qwen", LLM_MODEL="qwen3.7-plus", LLM_VISION="0")
+        self.assertTrue(self.sees("qwen", "qwen3-vl-flash", **env))             # another model of the same provider
+        self.assertFalse(self.sees("qwen", "Qwen/qwen3.7-plus", **env))        # the same model, however it is written
+        self.assertFalse(self.sees("qwen", None, **env))                        # no model named = the default one
+
+    def test_automatic_ignores_junk(self):
+        self.assertTrue(self.sees("claude", None, LLM_PROVIDER="claude", LLM_VISION="banana"))
+
+    def test_builtin_vision_is_unaffected_by_the_setting(self):
+        with mock.patch.dict(os.environ, {"LLM_PROVIDER": "claude", "LLM_VISION": "0"}):
+            self.assertTrue(llm_config.builtin_vision("claude", None))
+
+
 class Errors(unittest.TestCase):
     def test_unknown_provider_lists_the_valid_ones(self):
         with mock.patch.dict(os.environ, {**KEYS, "LLM_PROVIDER": "skynet"}):

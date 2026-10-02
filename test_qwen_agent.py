@@ -34,6 +34,15 @@ class Vision(unittest.TestCase):
             self.assertFalse(kw["use_vision"], (provider, model))
             self.assertFalse(kw["use_judge"], (provider, model))            # the reviewer sends screenshots too
 
+    def test_the_users_tick_box_decides_for_the_standard_model(self):
+        with mock.patch.dict(_os.environ, {"LLM_PROVIDER": "qwen", "LLM_MODEL": "qwen3.7-plus", "LLM_VISION": "0"}):
+            kw = setup_for("qwen", "qwen3.7-plus")
+        self.assertFalse(kw["use_vision"])
+        self.assertFalse(kw["use_judge"])                                   # no screenshots, so no reviewer either
+        with mock.patch.dict(_os.environ, {"LLM_PROVIDER": "deepseek", "LLM_VISION": "1"}):
+            kw = setup_for("deepseek", "deepseek-v4-pro")
+        self.assertTrue(kw["use_vision"])                                   # "my model can see" is believed
+
     def test_the_judge_switch_still_works(self):
         with mock.patch.dict(_os.environ, {"USE_JUDGE": "0"}):
             self.assertFalse(agent_ui._judge_enabled("qwen", True))

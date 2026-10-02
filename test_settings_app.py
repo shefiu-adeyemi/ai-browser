@@ -117,6 +117,42 @@ class Validation(SettingsCase):
         self.assertNotIn("NOT_A_SETTING", self.file())
 
 
+class VisionSetting(SettingsCase):
+    """The tick box in Settings: does the Standard model see screenshots?"""
+    def test_it_is_automatic_until_the_user_decides(self):
+        self.assertEqual(self.get()["LLM_VISION"], "")
+
+    def test_yes_and_no_are_saved_and_come_back(self):
+        self.assertEqual(self.post(LLM_VISION="1").status_code, 200)
+        self.assertEqual((self.get()["LLM_VISION"], self.file()["LLM_VISION"]), ("1", "1"))
+        self.post(LLM_VISION="0")
+        self.assertEqual(self.get()["LLM_VISION"], "0")
+        self.assertEqual(os.environ["LLM_VISION"], "0")                  # takes effect without a restart
+
+    def test_empty_or_auto_goes_back_to_automatic(self):
+        self.post(LLM_VISION="0")
+        self.post(LLM_VISION="")
+        self.assertEqual(self.get()["LLM_VISION"], "")
+        self.assertNotIn("LLM_VISION", os.environ)
+        self.post(LLM_VISION="1")
+        self.post(LLM_VISION="auto")
+        self.assertEqual(self.get()["LLM_VISION"], "")
+
+    def test_nonsense_is_refused_and_nothing_changes(self):
+        self.post(LLM_VISION="1")
+        r = self.post(LLM_VISION="maybe")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("LLM_VISION", r.json()["errors"])
+        self.assertEqual(self.get()["LLM_VISION"], "1")
+
+    def test_the_server_says_what_automatic_would_be(self):
+        for provider, model, auto in (("claude", "", True), ("deepseek", "deepseek-v4-pro", False), ("qwen", "qwen3.7-plus", True),
+                                      ("qwen", "qwen3.7-max", False), ("qwen", "qwen/qwen3-vl-flash", True)):
+            got = self.c.get("/settings/vision", params={"provider": provider, "model": model}).json()
+            self.assertEqual((got["ok"], got["auto"]), (True, auto), (provider, model))
+        self.assertEqual(self.c.get("/settings/vision", params={"provider": "skynet"}).status_code, 400)
+
+
 class ProvidersAndDefaults(SettingsCase):
     def test_the_server_tells_the_ui_which_providers_and_models_exist(self):
         """The UI had its own list with 'anthropic' where the server only knows 'claude'."""
