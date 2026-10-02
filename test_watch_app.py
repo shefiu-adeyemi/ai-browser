@@ -210,6 +210,16 @@ class WatchFlow(Base, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Row 2:", digest[0]["text"])
         self.assertNotIn('Finished: "Price watch"', self.titles())                                # a watch does not say "all ran"
 
+    async def test_a_batch_the_user_stopped_still_reports_what_the_rows_that_ran_found(self):
+        s = self.make(items=[{"page": "a"}, {"page": "b"}])
+        self.scheds.change_state(s.id, lambda st: st.model_copy(update={"batch_results": [
+            sch.BatchResult(index=0, status="done", run_id="run_" + "a" * 12, watch="changed", change='"Ann": Price 5 → 6'),
+            sch.BatchResult(index=1, status="stopped", detail="Stopped by you.")]}))
+        await self.real._batch_over(self.scheds.get(s.id), stopped_by_user=True)
+        titles = self.titles()
+        self.assertIn('1 of 2 changed: "Price watch"', titles)
+        self.assertIn('Stopped: "Price watch"', titles)
+
     async def test_an_ordinary_batch_still_says_it_finished(self):
         s = self.make(items=[{"page": "a"}, {"page": "b"}], watch=Watch(enabled=False))
         self.reads["*"] = done(table_out([["Ann", "5"]]))

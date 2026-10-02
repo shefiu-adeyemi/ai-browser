@@ -374,7 +374,7 @@ class Scheduler:
             await self._say("info", f'Finished: "{s.name}"',
                             f"All {ran} rows ran." if not declined else f"{ran} ran and you said no to {declined}.",
                             schedule_id=s.id, playbook_id=s.playbook_id)
-        if s.watch.enabled and not stopped_by_user:
+        if s.watch.enabled:                                    # what the rows that did run found is still worth hearing
             await self._tell_changes(s, results)
         if sch.parse_iso(s.state.next_run) is None and s.cadence.kind == "once":
             self._set_state(s.id, lambda x: x.model_copy(update={"next_run": None}))
@@ -391,7 +391,7 @@ class Scheduler:
             now = sch.iso(self._now()) or ""
             self._set_state(s.id, lambda x: x.model_copy(update={"last_change": text[:400], "last_change_at": now}))
             await self._say("warning", title, text, schedule_id=s.id, playbook_id=s.playbook_id, run_id=changed[0].run_id)
-        elif results and all(r.watch == "skipped" and r.status == "done" for r in results):
+        elif results and all(r.watch == "skipped" for r in results):
             # it ran, but nothing could be compared: say so, or the user believes it is being watched (at most once a day)
             last = sch.parse_iso(s.state.watch_warned_at)
             now = self._now()

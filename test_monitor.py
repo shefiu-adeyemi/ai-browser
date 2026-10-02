@@ -253,6 +253,12 @@ class Reporting(unittest.TestCase):
         self.assertEqual((rec["removed"], len(rec["removed_rows"])), (80, 50))
         self.assertEqual(rec["added"], 0)
 
+    def test_each_kind_is_capped_in_the_record_but_counted_exactly(self):
+        added = to_record(compare([], [table([[f"n{i}", "1"] for i in range(80)])], W()))
+        self.assertEqual((added["added"], len(added["added_rows"])), (80, 50))
+        changed = to_record(compare([table([[f"n{i}", "1"] for i in range(80)])], [table([[f"n{i}", "2"] for i in range(80)])], W()))
+        self.assertEqual((changed["changed"], len(changed["changed_rows"])), (80, 50))
+
     def test_the_record_has_the_changed_cells(self):
         rec = to_record(self.diff())
         self.assertEqual(rec["changed_rows"], [{"table": "s2", "key": "Ann", "columns": [{"column": "Price", "before": "5", "after": "6"}]}])
