@@ -134,8 +134,8 @@ def usable(suggestion: Suggestion) -> Suggestion:
     return Suggestion(row_selector=row or None, fields=fields)
 
 
-async def suggest(page: Any, llm: Any, description: str, url: str = "") -> dict:
-    """Propose, then TRY it on the page. {"row_selector", "fields", "dropped": [names], "table": {...}}."""
+async def propose(page: Any, llm: Any, description: str, url: str = "") -> Suggestion:
+    """What the model suggests, cut down to what a scrape step accepts. NOT yet tried on the page (see verify)."""
     description = " ".join((description or "").split())[:MAX_DESCRIPTION]
     if not description:
         raise SuggestError("Say what you want to read, for example: the product names and prices.")
@@ -152,7 +152,12 @@ async def suggest(page: Any, llm: Any, description: str, url: str = "") -> dict:
     cleaned = usable(raw)
     if not cleaned.fields:
         raise SuggestError("The model found nothing to read for that. Try describing the columns more exactly.")
-    return await verify(page, cleaned)
+    return cleaned
+
+
+async def suggest(page: Any, llm: Any, description: str, url: str = "") -> dict:
+    """Propose, then TRY it on the page. {"row_selector", "fields", "dropped": [names], "table": {...}}."""
+    return await verify(page, await propose(page, llm, description, url))
 
 
 async def verify(page: Any, s: Suggestion) -> dict:

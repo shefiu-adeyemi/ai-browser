@@ -61,6 +61,7 @@ export interface ProviderInfo {
 export interface Settings {
   LLM_PROVIDER: string
   LLM_MODEL: string
+  LLM_VISION: string   // '' = automatic, '1' = yes, '0' = no (about the Standard model)
   ANTHROPIC_API_KEY: string
   OPENAI_API_KEY: string
   GEMINI_API_KEY: string
@@ -205,6 +206,7 @@ export interface Playbook {
   variables: PlaybookVariable[]
   steps: PlaybookStep[]
   domains: string[]
+  repair?: boolean
   [more: string]: unknown
 }
 
@@ -290,12 +292,23 @@ export interface PlaybookStepResult {
   tokens?: number | null         // what that used (prompt + answer), when the model reported it
 }
 
+/** A step a run could only get through by repairing it (server: playbook_repair.py). */
+export interface RunRepair {
+  step_id: string
+  kind: 'element' | 'scrape'
+  note?: string
+  summary: string
+  why?: string
+  was?: string
+}
+
 export interface PlaybookRunRecord extends Omit<PlaybookRunSummary, 'steps' | 'ok_steps' | 'watch'> {
   screenshot?: boolean
   inputs: Record<string, string>
   steps: PlaybookStepResult[]
   outputs: { step_id: string; query: string; text: string; table?: ScrapedTable }[]
   watch?: WatchResult
+  repairs?: RunRepair[]
 }
 
 export interface DamagedPlaybook {

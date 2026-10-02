@@ -210,6 +210,9 @@ class Playbook(BaseModel):
     steps: list[Step] = Field(default_factory=list)
     domains: list[str] = Field(default_factory=list)
     source: Source = Field(default_factory=Source)
+    # Let a model pick the replacement when a step's element (or a table's selectors) can't be found. Off by default; it
+    # changes what a run may do, so it is part of what the user approves. Never applies to steps that send or post.
+    repair: bool = False
     approval: Optional[Approval] = None
 
 
@@ -533,17 +536,36 @@ def compute_domains(pb: Playbook) -> list[str]:
 
 
 # ------------------------------------------------------------------------------ approval
+# Step fields added after the first playbooks were approved. They are part of the hash only when a step USES them, so a
+# playbook approved before they existed keeps its approval (adding a field to the format must never cost everyone theirs).
+_LATE_STEP_FIELDS = ("timeout_minutes", "on_timeout", "variable", "fields", "row_selector", "max_rows",
+                     "source", "column", "body", "on_failure")
+
+
 def approval_hash(pb: Playbook) -> str:
     """Fingerprint of everything a user approves: the steps, what the variables may be, the sites.
     Notes and names are cosmetic and excluded, so renaming does not cost the approval. So is the model tier of a
-    step: it changes what a run costs, not what it does or may reach (the guard is the same on every tier)."""
-    body = {
-        "steps": [s.model_dump(mode="json", exclude={"note", "tier"}) for s in pb.steps],
-        "variables": [{"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts), "runtime": v.runtime,
-                       "loop": v.loop}
-                      for v in pb.variables],
-        "domains": compute_domains(pb),
-    }
+    step: it changes what a run costs, not what it does or may reach (the guard is the same on every tier).
+    Settings that were added later (see _LATE_STEP_FIELDS, a runtime or loop variable, repair) count only when they
+    are set, so playbooks approved before those existed are still approved."""
+    steps = []
+    for s in pb.steps:
+        d = s.model_dump(mode="json", exclude={"note", "tier"})
+        for k in _LATE_STEP_FIELDS:
+            if d.get(k) is None:
+                d.pop(k, None)
+        steps.append(d)
+    variables = []
+    for v in pb.variables:
+        item = {"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts)}
+        if v.runtime:
+            item["runtime"] = True
+        if v.loop:
+            item["loop"] = True
+        variables.append(item)
+    body = {"steps": steps, "variables": variables, "domains": compute_domains(pb)}
+    if pb.repair:
+        body["repair"] = True
     return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 

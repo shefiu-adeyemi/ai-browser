@@ -32,10 +32,35 @@ MAX_OUTPUT_TOKENS = 8192
 QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 
+def vision_override() -> Optional[bool]:
+    """The user's own answer from Settings ("this model can / cannot see screenshots"), or None for automatic."""
+    value = (os.getenv("LLM_VISION") or "").strip().lower()
+    return True if value == "1" else False if value == "0" else None
+
+
+def _is_standard_model(provider_id: str, model: Optional[str]) -> bool:
+    """Is this the Standard model chosen in Settings (the one the vision answer in Settings is about)?"""
+    configured = providers.resolve_provider_id(os.getenv("LLM_PROVIDER", ""))
+    if configured != provider_id:
+        return False
+    default = providers.BY_ID[provider_id].default_model
+    wanted = providers.strip_model_prefix(os.getenv("LLM_MODEL", "")) or default
+    return (providers.strip_model_prefix(model or "") or default).lower() == wanted.lower()
+
+
 def supports_vision(provider_id: str, model: Optional[str] = None) -> bool:
-    """Can this model take screenshots? When it can't, the agent works from the page's text and element list
-    alone (browser-use's main way of reading a page) and the end-of-run check, which needs to see the page, is off.
-    Unknown models are assumed NOT to, because a text-only model sent an image fails the whole run."""
+    """Can this model take screenshots? What Settings says wins for the Standard model; otherwise the app's
+    own knowledge (builtin_vision) decides. When a model can't see, the agent works from the page's text and
+    element list alone (browser-use's main way of reading a page) and the end-of-run check is off."""
+    override = vision_override()
+    if override is not None and _is_standard_model(provider_id, model):
+        return override
+    return builtin_vision(provider_id, model)
+
+
+def builtin_vision(provider_id: str, model: Optional[str] = None) -> bool:
+    """The app's own knowledge of which models can see (what Settings shows as "automatic"). Unknown models
+    are assumed NOT to, because a text-only model sent an image fails the whole run."""
     if provider_id == "deepseek":
         return False
     if provider_id == "qwen":

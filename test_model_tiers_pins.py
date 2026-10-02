@@ -154,7 +154,8 @@ class InThePlaybook(unittest.TestCase):
     def test_an_approval_made_before_tiers_existed_still_holds(self):
         """The hash must not mention the tier at all, or every playbook approved earlier would need approving again."""
         pb = Playbook(name="x", steps=[Step(id="s1", kind="extract", tag="ai", query="q")])
-        legacy_steps = [{k: v for k, v in s.model_dump(mode="json", exclude={"note"}).items() if k != "tier"} for s in pb.steps]
+        late = ("timeout_minutes", "on_timeout", "variable", "fields", "row_selector", "max_rows", "source", "column", "body", "on_failure")
+        legacy_steps = [{k: v for k, v in s.model_dump(mode="json", exclude={"note"}).items() if k != "tier" and k not in late} for s in pb.steps]
         body = {"steps": legacy_steps, "variables": [], "domains": pbk.compute_domains(pb)}
         legacy = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
         self.assertEqual(pbk.approval_hash(pb), legacy)

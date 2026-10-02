@@ -403,3 +403,34 @@ nothing (no model is involved at any point).
 
 Not built: a model-written summary of a change (only when something changed), email/Telegram/webhook delivery (inbox and desktop only
 for now), and a graph of a value over time.
+
+## Phase 7 status: self-repair (built and tested)
+When a recorded step can't find its button or field, or a table's selectors stopped matching, the playbook can ask an AI model to
+pick the likely replacement from what is really on the page, instead of stopping. It is **off unless the playbook says so**
+("Let AI repair a step when the page has changed" in the editor), and that choice is part of what the user approves (switching it on
+costs the approval, like any change to what a run may do).
+- **What it may repair.** A click, type, select or scroll whose element is not found (after the usual wait), and a "read a table"
+  step whose rows or columns match nothing. **Never** a step that sends or posts (`ask`), never typing a stored password or other
+  secret, never key presses, and never a step that WAS found (a repair only starts after the normal search fails).
+- **How it is kept safe.** The model sees a short numbered list of elements already on the page (at most 10, only ones that look like
+  the recorded one and are a compatible kind: a link and a button can stand in for each other, an input cannot become a link),
+  with page text marked as data it must not obey, and may answer only with a number or "none" (unsure means none). It cannot invent a
+  selector or an index. For a table it must find ALL the recorded columns by their recorded names and kinds, and the result is tried
+  on the page before it is used. A repaired match is only ever **medium confidence**, so a step the user pre-approved is never
+  auto-approved on the strength of a guess, and the safety guard still stops risky clicks by their label (an unattended repaired click
+  it would stop becomes "needs you"). At most 3 repairs a run; a table repair found in a loop is reused for the remaining rows.
+- **It never rewrites the playbook by itself.** Every repair is written into the run record and the chat ("Repaired step 2: ..."), a
+  scheduled run posts one inbox message ("Repaired 2 steps"), and the run history shows what was repaired and why. "Update the
+  playbook with these" (steps can be unticked) saves a NEW version, only if the playbook is still the version that run used, and
+  asks for approval again. Until then each run repairs again (and costs a call).
+- **Cost and privacy.** One call to the Fast model tier ("repair" job) per repair attempt; the model is sent the element names and
+  attributes from the page in view (for a table, the same short outline as "Suggest with AI": no scripts, typed values or link
+  query strings). Calls are counted in the usage ledger.
+- **Tests.** `test_playbook_repair.py` (shortlist, choosing, table selectors, applying), `test_repair_player.py` (21: what is and is not
+  repaired, caps, confidence, the guard, loops), `test_repair_app.py` (building the repairer, the inbox message, applying through the
+  API), frontend `RepairsPanel.test.tsx`, and real-Chromium tests (`test_repair_browser.py`: a renamed, moved button and a
+  restructured table are repaired and read correctly, the playbook is unchanged until updated, an updated version works with repair
+  off and no model, an unrelated button is never offered).
+
+Not built: repairing a step by looking at a screenshot, automatically updating the playbook after repeated identical repairs (it
+only ever offers), and repairing a step in a loop body differently per row.

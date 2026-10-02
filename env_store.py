@@ -221,6 +221,15 @@ def _clean_one(key: str, value) -> Optional[str]:
         if not _MODEL_RE.match(model):
             raise ValueError("is not a valid model name (letters, digits and . _ : / @ + - only)")
         return model
+    if key == "LLM_VISION":
+        word = text.lower()
+        if word in ("1", "true", "yes", "on"):
+            return "1"
+        if word in ("0", "false", "no", "off"):
+            return "0"
+        if word == "auto":
+            return None                                           # back to automatic
+        raise ValueError('must be yes, no or auto')
     if key in API_KEYS:
         if not _API_KEY_RE.match(text):
             raise ValueError("does not look like an API key (8-500 visible characters, no spaces)")

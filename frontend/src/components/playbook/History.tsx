@@ -4,6 +4,7 @@ import type { PlaybookRunRecord, PlaybookRunSummary } from '@/types'
 import { KIND_LABEL, WATCH_LABEL, errText, formatWhen, readJson, reasonOf } from './shared'
 import ResultTable from './ResultTable'
 import ChangeList from './ChangeList'
+import RepairsPanel from './RepairsPanel'
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   done: { label: 'Done', cls: 'bg-green-50 text-green-700' },
@@ -73,6 +74,9 @@ export default function History({ id, name, onBack, onEdit }: { id: string; name
           </div>
           {open.error && <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-700">{open.error}</p>}
           {open.watch && <ChangeList watch={open.watch} />}
+          {(open.repairs?.length ?? 0) > 0 && (
+            <RepairsPanel playbookId={id} runId={open.run_id} repairs={open.repairs!} onApplied={() => { /* the editor shows the new version */ }} />
+          )}
           {open.screenshot && (
             <div>
               <p className="text-xs font-medium text-gray-700">What the page looked like when it stopped</p>

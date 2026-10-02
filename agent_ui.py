@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from browser_use import Agent
 from browser_use.browser.session import BrowserSession
-from llm_config import get_llm, supports_vision
+from llm_config import builtin_vision, get_llm, supports_vision
 import model_tiers
 import app_paths
 import env_store
@@ -32,6 +32,7 @@ import providers
 from action_guard import GuardedTools, SAFETY_PROMPT
 from approvals import ApprovalBroker
 import playbook_picker
+import playbook_repair
 import playbook_suggest
 import playbook_scrape
 import watcher
@@ -401,6 +402,9 @@ def _escalate_for_retry(agent: Agent) -> str | None:
             return None
         pick = _router.pick("retry")
         if pick.slot.collapsed or pick.provider_id == "deepseek":
+            return None
+        # An agent that works from screenshots must not be handed to a model that can't take them.
+        if getattr(agent.settings, "use_vision", False) and not supports_vision(pick.provider_id, pick.slot.model):
             return None
         stronger = _router.llm("retry")
         if stronger.model == agent.llm.model:
@@ -1079,7 +1083,7 @@ async def answer_approval(aid: str, body: dict):
 
 SETTINGS_KEYS = [
     "LLM_PROVIDER", "LLM_MODEL", "LLM_FAST_PROVIDER", "LLM_FAST_MODEL", "LLM_STRONG_PROVIDER", "LLM_STRONG_MODEL",
-    "LLM_ROUTER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "QWEN_API_KEY",
+    "LLM_ROUTER", "LLM_VISION", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "QWEN_API_KEY",
     "LINKEDIN_EMAIL", "LINKEDIN_PASSWORD", "MAX_STEPS", "CONTEXT_TURNS", "APPROVAL_MODE",
 ]
 
@@ -1110,6 +1114,7 @@ async def get_settings():
     for tier_key in ("LLM_FAST_MODEL", "LLM_STRONG_MODEL"):
         d[tier_key] = providers.strip_model_prefix(d[tier_key])
     d["LLM_ROUTER"] = "off" if d["LLM_ROUTER"].strip().lower() == "off" else "auto"
+    d["LLM_VISION"] = d["LLM_VISION"].strip() if d["LLM_VISION"].strip() in ("0", "1") else ""   # "" = automatic
     d["TIERS"] = model_tiers.describe()                  # what each slot really resolves to, and why
     d["APPROVAL_MODE"] = d["APPROVAL_MODE"] or "ask"
     d["UNREADABLE"] = env_store.unreadable_secrets(ENV_PATH)     # stored secrets this account can't decrypt
@@ -1119,6 +1124,15 @@ async def get_settings():
     d["CONTEXT_TURNS"] = _as_int(d["CONTEXT_TURNS"], 3, low=0, high=20)
     d["PROVIDERS"] = providers.ui_description()        # single source of truth for the pickers
     return d
+
+@app.get("/settings/vision")
+async def settings_vision(provider: str = "", model: str = ""):
+    """What the app would decide by itself for this provider and model (shown next to the vision tick box)."""
+    pid = providers.resolve_provider_id(provider)
+    if pid is None:
+        return JSONResponse({"ok": False, "reason": "unknown provider"}, status_code=400)
+    return {"ok": True, "auto": builtin_vision(pid, model)}
+
 
 @app.post("/settings")
 async def save_settings(body: dict):
@@ -1281,8 +1295,16 @@ async def _build_player(pb: pbk.Playbook, attended: bool) -> PlaybookPlayer:
     def keep(variable: str, value: str) -> None:
         _remembered.set(pb.id, variable, value)
 
+    repairer = None
+    if pb.repair and any(s.kind in ("click", "type", "select", "scroll", "scrape") for s in pb.steps):
+        try:
+            if model_tiers.read_slots()["standard"].usable:          # no model at all: nothing can be repaired
+                repairer = playbook_repair.Repairer(_router.escalating("repair"), session.get_current_page)
+        except Exception as e:
+            _log.warning("no model for repairing playbook steps: %s", e)
+
     return PlaybookPlayer(SessionDriver(session, tools, sensitive_data=sensitive, llm=llm, llm_for=llm_for), approver, notify=say,
-                          remember=keep)
+                          remember=keep, repairer=repairer)
 
 
 def _remembered_answers(pb: pbk.Playbook) -> dict[str, str]:
@@ -1302,7 +1324,7 @@ def _save_run_record(pb: pbk.Playbook, record: dict, status: str, error: str, re
     record.update(status=status, error=error, finished_at=datetime.now().timestamp(),
                   seconds=round(datetime.now().timestamp() - record["started_at"], 1))
     if result is not None:
-        record.update(steps=result.to_dict()["steps"], outputs=result.outputs)
+        record.update(steps=result.to_dict()["steps"], outputs=result.outputs, repairs=result.repairs)
         if result.screenshot:
             try:
                 _runs.save_screenshot(pb.id, record["run_id"], result.screenshot)
@@ -1405,6 +1427,11 @@ async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, s
         if seen is not None:
             record["watch"] = seen
         _save_run_record(pb, record, result.status, result.error, result)
+        if result.repairs:                                      # it carried on, but something it was shown has moved: say so
+            n = len(result.repairs)
+            await _notify_user("info", f'Repaired {n} step{"" if n == 1 else "s"}: "{pb.name}"',
+                               "; ".join(r.get("summary", "") for r in result.repairs[:3]) + " Open the run history to update the playbook with it.",
+                               schedule_id=schedule.id, playbook_id=pb.id, run_id=run_id)
         await _broadcast({"type": "status", "text": "done" if result.status in ("done", "waiting") else "error"})
         return SchedOutcome(result.status, run_id, result.error, waiting=result.waiting,
                             watch={"status": seen["status"], "summary": seen.get("summary") or seen.get("reason", "")} if seen else None)
@@ -1671,6 +1698,49 @@ async def playbook_check_rows(pid: str, body: dict):
     if not isinstance(rows, list) or len(rows) > sch.MAX_ITEMS:
         return _pb_error(400, f"Give a list of at most {sch.MAX_ITEMS} rows.")
     return {"ok": True, **check_rows(pb, rows, _limits)}
+
+
+@app.post("/playbooks/{pid}/runs/{rid}/apply-repairs")
+async def apply_run_repairs(pid: str, rid: str, body: dict):
+    """Write what a run's repairs found into the playbook, as a new version the user must approve again. Only if the
+    playbook is still the version that run used, and only for the steps asked for."""
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    if not RunStore.is_valid_id(rid):
+        return _pb_error(400, "invalid run id")
+    rec = _runs.get(pid, rid)
+    if rec is None:
+        return _pb_error(404, "That run is no longer kept.")
+    repairs = rec.get("repairs") or []
+    if not repairs:
+        return _pb_error(409, "That run did not repair anything.")
+    ids = body.get("step_ids")
+    if ids is not None and not (isinstance(ids, list) and all(isinstance(i, str) for i in ids)):
+        return _pb_error(400, "step_ids must be a list of step ids")
+    try:
+        pb = _playbooks.get(pid)
+    except PlaybookNotFound:
+        return _pb_error(404, "That playbook no longer exists.")
+    except PlaybookInvalid as e:
+        return _pb_error(422, "This playbook can't be changed.", problems=e.problems)
+    if rec.get("playbook_version") != pb.version:
+        return _pb_error(409, f"The playbook has changed since that run (it is now version {pb.version}), so those repairs may not fit. "
+                              "Run it again to get fresh ones.")
+    new, applied, problems = playbook_repair.apply_repairs(pb, repairs, ids)
+    if not applied:
+        return _pb_error(409, "Nothing could be applied.", problems=problems)
+    try:
+        saved = _playbooks.save(new, expected_version=pb.version)
+    except PlaybookInvalid as e:
+        return _pb_error(400, "The repaired playbook has problems.", problems=e.problems)
+    except PlaybookConflict as e:
+        return _pb_error(409, str(e))
+    except OSError as e:
+        _log.exception("could not save repairs")
+        return _pb_error(500, f"Couldn't write the playbook to disk ({type(e).__name__}: {e}).")
+    affected = sum(1 for x in _schedules.all() if x.playbook_id == saved.id and x.enabled)
+    return {"ok": True, "applied": applied, "problems": problems, "playbook": saved.model_dump(mode="json"),
+            "approved": pbk.is_approved(saved), "schedules_affected": affected}
 
 
 @app.get("/playbooks/{pid}/runs/{rid}/screenshot")

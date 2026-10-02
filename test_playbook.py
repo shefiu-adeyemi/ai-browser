@@ -3,7 +3,7 @@
 import unittest
 
 import playbook as pbk
-from playbook import Check, Fingerprint, Playbook, Step, Variable
+from playbook import Check, Fingerprint, Playbook, ScrapeField, Step, Variable
 
 
 def linkedin_playbook(**over) -> Playbook:
@@ -245,6 +245,49 @@ class ApproveStep(unittest.TestCase):
         self.assertFalse(pbk.is_approved(without))
         reworded = with_cp.model_copy(update={"steps": [with_cp.steps[0].model_copy(update={"timeout_minutes": 10}), with_cp.steps[1]]})
         self.assertFalse(pbk.is_approved(reworded))                              # a shorter wait is a different promise
+
+
+class ApprovalsSurviveNewFeatures(unittest.TestCase):
+    """Adding a setting to the format must not cost anyone the approvals they already gave."""
+    LATE = ("timeout_minutes", "on_timeout", "variable", "fields", "row_selector", "max_rows", "source", "column", "body", "on_failure")
+
+    def legacy(self, pb):
+        import hashlib, json
+        steps = [{k: v for k, v in s.model_dump(mode="json", exclude={"note", "tier"}).items() if k not in self.LATE} for s in pb.steps]
+        body = {"steps": steps, "variables": [{"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts)} for v in pb.variables],
+                "domains": pbk.compute_domains(pb)}
+        return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+    def pb(self, **kw):
+        return Playbook(name="x", variables=[Variable(name="p", type="linkedin_url")], steps=[
+            Step(id="s1", kind="open", url="{{p}}"),
+            Step(id="s2", kind="click", target=Fingerprint(node_name="button", ax_name="Go"), ask=True)], **kw)
+
+    def test_a_playbook_that_uses_none_of_the_newer_settings_hashes_as_it_always_did(self):
+        pb = self.pb()
+        self.assertEqual(pbk.approval_hash(pb), self.legacy(pb))
+        self.assertTrue(pbk.is_approved(pbk.with_approval(pb)))
+
+    def test_each_newer_setting_counts_once_it_is_used(self):
+        base = pbk.approval_hash(self.pb())
+        self.assertNotEqual(base, pbk.approval_hash(self.pb(repair=True)))
+        pb = self.pb()
+        self.assertNotEqual(base, pbk.approval_hash(pb.model_copy(update={"variables": [Variable(name="p", type="linkedin_url", runtime=True)]})))
+        self.assertNotEqual(base, pbk.approval_hash(pb.model_copy(update={"variables": [Variable(name="p", type="linkedin_url", loop=True)]})))
+        step = pb.steps[0]
+        for field, value in (("timeout_minutes", 30), ("on_timeout", "skip"), ("variable", "v"), ("row_selector", "tr"), ("max_rows", 5),
+                             ("source", "s0"), ("column", "c"), ("body", 2), ("on_failure", "skip"),
+                             ("fields", [ScrapeField(name="A", selector="td")])):
+            changed = pb.model_copy(update={"steps": [step.model_copy(update={field: value}), pb.steps[1]]})
+            self.assertNotEqual(base, pbk.approval_hash(changed), field)
+
+    def test_a_runtime_and_a_loop_variable_are_told_apart(self):
+        a = self.pb().model_copy(update={"variables": [Variable(name="p", type="text", runtime=True)]})
+        b = self.pb().model_copy(update={"variables": [Variable(name="p", type="text", loop=True)]})
+        self.assertNotEqual(pbk.approval_hash(a), pbk.approval_hash(b))
+
+    def test_repair_off_is_the_same_as_before_repair_existed(self):
+        self.assertEqual(pbk.approval_hash(self.pb(repair=False)), self.legacy(self.pb()))
 
 
 class SkipOnTimeout(unittest.TestCase):

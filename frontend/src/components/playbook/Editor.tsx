@@ -416,6 +416,19 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
           <p className="text-xs text-gray-600">It may visit: <span className="font-medium">{pb.domains.join(', ')}</span></p>
         )}
 
+        {pb.steps.some((s) => ['click', 'type', 'select', 'scroll', 'scrape'].includes(s.kind)) && (
+          <label className="flex items-start gap-2 rounded-lg border border-gray-200 px-3 py-2.5">
+            <input type="checkbox" checked={!!pb.repair} onChange={(e) => stepsChanged({ ...pb, repair: e.target.checked })} className="mt-0.5" />
+            <span className="text-xs text-gray-700">
+              <span className="font-medium text-gray-900">Let AI repair a step when the page has changed</span>
+              <span className="mt-0.5 block text-[11px] text-gray-500">
+                If a button, field or table can't be found, your AI model picks the closest match on the page instead of stopping (up to 3 a run).
+                It never does this for a step that sends or posts, or types a stored password, and every repair is listed in the run history. Needs your approval below.
+              </span>
+            </span>
+          </label>
+        )}
+
         <label className="flex items-start gap-2 rounded-lg border border-gray-200 px-3 py-2.5">
           <input type="checkbox" checked={approve} onChange={(e) => setApprove(e.target.checked)} className="mt-0.5" />
           <span className="text-xs text-gray-700">

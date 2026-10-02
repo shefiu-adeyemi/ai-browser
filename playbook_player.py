@@ -31,6 +31,7 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
 import playbook as pbk
+import playbook_repair
 import playbook_scrape
 from playbook import Playbook, Step
 from playbook_match import Candidate, Match, candidates_from_selector_map, closest, find
@@ -61,6 +62,7 @@ class StepResult:
     fatal: bool = False               # the run must stop even if later steps could go on
     meta: Optional[dict] = None       # for a waiting step: what is being asked (see PlaybookPlayer._approve)
     table: Optional[dict] = None      # what a scrape step read: {"columns", "rows", "truncated", "total"}
+    repair: Optional[dict] = None     # set when this step only worked because it was repaired (see playbook_repair)
 
 
 @dataclass
@@ -73,6 +75,7 @@ class RunResult:
     finished_at: float = 0.0
     screenshot: Optional[bytes] = None      # what the page looked like when the run stopped (JPEG), if it did not finish
     waiting: Optional[dict] = None          # set when the run is parked at an approve step: the question and where
+    repairs: list[dict] = field(default_factory=list)      # steps that were repaired during the run, so the user can update the playbook
 
 
     @property
@@ -83,7 +86,7 @@ class RunResult:
         steps = [{k: v for k, v in asdict(s).items() if k != "table"} for s in self.steps]     # tables live in `outputs`
         return {"status": self.status, "error": self.error, "seconds": self.seconds,
                 "steps": steps, "outputs": self.outputs,
-                "screenshot": self.screenshot is not None, "waiting": self.waiting}
+                "screenshot": self.screenshot is not None, "waiting": self.waiting, "repairs": self.repairs}
 
 
 # ------------------------------------------------------------------------------- approvals
@@ -268,7 +271,8 @@ class PlaybookPlayer:
                  settle: float = 0.7, find_timeout: float = 10.0, poll: float = 0.5,
                  max_seconds: float = MAX_RUN_SECONDS, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                 remember: Optional[Callable[[str, str], None]] = None) -> None:
+                 remember: Optional[Callable[[str, str], None]] = None, repairer: Any = None) -> None:
+        self._repairer = repairer                              # picks a replacement for a missing element (None: never repairs)
         self._remember = remember                              # called with (variable, value) for an answer to keep
         self.driver, self.approver, self._notify = driver, approver, notify
         self.settle, self.find_timeout, self.poll = settle, find_timeout, poll
@@ -334,6 +338,9 @@ class PlaybookPlayer:
         self._left_out = False                                        # a step was skipped because nobody answered
         self._tables: dict[str, dict] = {}                            # what each scrape step read, for a foreach step
         self._pending_loop: Optional[dict] = None
+        self._repair_on = bool(pb.repair) and self._repairer is not None      # the playbook (and so the user's approval) allows it
+        self._repairs_used = 0
+        self._scrape_override: dict[str, tuple[Optional[str], list[dict]]] = {}      # selectors a repair found, for the rest of the run
         self._loop_ctx: Optional[tuple[str, str]] = None
         self._cells_left = MAX_RUN_CELLS
         i = 0
@@ -377,6 +384,9 @@ class PlaybookPlayer:
             self._prev_high = res.status == "ok" and (res.matched or "").endswith("(high)")
         res.seconds = round(self._clock() - t0, 2)
         result.steps.append(res)
+        if res.repair:                                          # only set on a step that worked
+            result.repairs.append({**res.repair, "step_id": step.id, "note": describe(step)})
+            await self._say(f"🔧 Repaired step {n}: {res.repair.get('summary', 'found a replacement')}")
 
         if res.status == "ok" and step.ask and step.id not in self._skip:
             self._did.add(step.id)
@@ -564,12 +574,13 @@ class PlaybookPlayer:
         read = getattr(self.driver, "scrape", None)
         if read is None:
             return StepResult(step.id, step.kind, status="failed", detail="This browser can't read a table off a page.")
-        fields = [f.model_dump() for f in (step.fields or [])]
-        row_mode = bool(step.row_selector)
+        row_selector, fields = self._scrape_override.get(step.id) or (step.row_selector, [f.model_dump() for f in (step.fields or [])])
+        row_mode = bool(row_selector)
         deadline = self._clock() + self.find_timeout
+        repaired: Optional[dict] = None
         while True:
             try:
-                raw = await asyncio.wait_for(read(step.row_selector, fields, step.max_rows), timeout=60)
+                raw = await asyncio.wait_for(read(row_selector, fields, step.max_rows), timeout=60)
             except asyncio.CancelledError:
                 raise
             except playbook_scrape.ScrapeError as e:
@@ -580,6 +591,23 @@ class PlaybookPlayer:
             if table is not None:
                 break
             if self._clock() >= deadline:
+                if repaired is None and self._can_repair(step) and step.id not in self._scrape_override:
+                    self._repairs_used += 1
+                    try:
+                        fix = await self._repairer.selectors(step, await self._safe_url())
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        fix = None
+                    if fix:
+                        row_selector, fields, row_mode = fix["row_selector"], fix["fields"], bool(fix["row_selector"])
+                        self._scrape_override[step.id] = (row_selector, fields)
+                        repaired = {"kind": "scrape", "was": f'{step.row_selector or "the page"}: ' + ", ".join(f.selector for f in step.fields or []),
+                                    "now": {"row_selector": row_selector, "fields": fields},
+                                    "why": "The old selectors found nothing, so new ones were found for the same columns.",
+                                    "summary": "the table's selectors stopped matching, so new ones were found for the same columns"}
+                        deadline = self._clock() + self.find_timeout
+                        continue
                 return StepResult(step.id, step.kind, status="failed", detail=problem)
             await self._sleep(self.poll)
         ctx = self._loop_ctx
@@ -587,7 +615,7 @@ class PlaybookPlayer:
             table = {**table, "columns": [ctx[0], *table["columns"]], "rows": [[ctx[1], *r] for r in table["rows"]]}
         n = len(table["rows"])
         more = f" (the page has {table['total']}; the rest were left out)" if table["truncated"] else ""
-        return StepResult(step.id, step.kind, output=f"{n} row{'' if n == 1 else 's'} read{more}", table=table)
+        return StepResult(step.id, step.kind, output=f"{n} row{'' if n == 1 else 's'} read{more}", table=table, repair=repaired)
 
     async def _tab(self, step: Step) -> StepResult:
         ids = await self.driver.tabs()
@@ -696,8 +724,11 @@ class PlaybookPlayer:
 
     async def _on_element(self, step: Step) -> StepResult:
         text = pbk.render(step.text, self._values) if step.kind in ("type", "select") else None
+        repaired: Optional[dict] = None
         for attempt in (1, 2):
             match = await self._resolve(step)
+            if match is None and repaired is None and self._can_repair(step):
+                match, repaired = await self._repair_element(step)
             if match is None:
                 return StepResult(step.id, step.kind, status="failed",
                                   detail=f"Couldn't find {_step_target_text(step)} on the page." + await self._hint(step))
@@ -715,8 +746,40 @@ class PlaybookPlayer:
             # The page can change between reading it and acting on it: read it again once.
             if res.status == "failed" and "not available" in res.detail and attempt == 1:
                 continue
+            if repaired is not None and res.status == "ok":
+                res.repair = repaired
             return res
         return res                                                       # pragma: no cover
+
+    def _can_repair(self, step: Step) -> bool:
+        """Only when the playbook allows it, within the per-run cap, and never for something that sends or posts
+        or types a stored secret: a wrong guess there is not a small mistake."""
+        if not self._repair_on or self._repairs_used >= playbook_repair.MAX_REPAIRS or step.ask:
+            return False
+        if step.kind == "type" and pbk.SECRET_RE.search(step.text or ""):
+            return False
+        return True
+
+    async def _repair_element(self, step: Step) -> tuple[Optional[Match], Optional[dict]]:
+        """Ask for a replacement among the few elements that look most like the missing one. It is only ever a
+        MEDIUM match, so nothing the user pre-approved is waved through on the strength of a guess."""
+        self._repairs_used += 1
+        try:
+            options = playbook_repair.shortlist(step, await self.driver.candidates())
+            host = host_of(await self._safe_url()) or "a blank page"
+            got = await self._repairer.choose(step, options, host)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None, None
+        if got is None:
+            return None, None
+        cand, why = got
+        fp = playbook_repair.fingerprint_of(cand)
+        label = (cand.ax_name or cand.attributes.get("aria-label") or cand.node_name)[:60]
+        return (Match(index=cand.index, level="repaired", confidence="medium"),
+                {"kind": "element", "was": playbook_repair.describe(step), "now": fp.model_dump(),
+                 "why": why[:200], "summary": f'{_step_target_text(step)} was not on the page, so "{label}" was used instead'})
 
     async def _hint(self, step: Step) -> str:
         """After a miss: where the run is, and what on the page looks most like the missing element."""
