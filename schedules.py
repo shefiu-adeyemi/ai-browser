@@ -20,6 +20,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 import playbook as pbk
+from monitor import Watch, watch_problems
 from playbook import Playbook
 
 MAX_ITEMS = 200               # input rows in one schedule
@@ -70,6 +71,8 @@ class BatchResult(BaseModel):
     status: str                                                # done | failed | needs_you | stopped | skipped
     run_id: str = ""
     detail: str = Field(default="", max_length=300)
+    watch: str = ""                                            # a watched run: baseline | unchanged | changed | reset | skipped
+    change: str = Field(default="", max_length=300)            # what changed, in words
 
 
 class ParkedRun(BaseModel):
@@ -113,6 +116,9 @@ class ScheduleState(BaseModel):
     last_run_at: Optional[str] = None
     last_status: str = ""
     last_detail: str = Field(default="", max_length=400)
+    last_change: str = Field(default="", max_length=400)       # the last change a watch found, in words
+    last_change_at: Optional[str] = None
+    watch_warned_at: Optional[str] = None                      # when we last said a watch could not compare (once a day at most)
     missed: int = 0
     runs_total: int = 0
 
@@ -129,6 +135,7 @@ class Schedule(BaseModel):
     # Sends, posts and other steps that reach other people are OFF for unattended runs unless the user says
     # so here, on top of approving the playbook (PLAYBOOKS.md: "off by default").
     allow_sensitive: bool = False
+    watch: Watch = Field(default_factory=Watch)               # tell me only when what it reads changes
     created_at: str = ""
     updated_at: str = ""
     state: ScheduleState = Field(default_factory=ScheduleState)
@@ -255,6 +262,9 @@ def validate_schedule(sch: Schedule, pb: Optional[Playbook], now: datetime) -> l
         out.append("that playbook no longer exists")
         return out
     out += unattended_problems(pb, sch.allow_sensitive)
+    out += [f"watch: {p}" for p in watch_problems(sch.watch)]
+    if sch.watch.enabled and not any(s.kind == "scrape" for s in pb.steps):
+        out.append("watch: watching for changes needs a playbook with a step that reads a table")
     for n, item in enumerate(sch.items, start=1):
         _values, errors = pbk.bind_values(pb, item)
         out += [f"row {n}: {e}" for e in errors]

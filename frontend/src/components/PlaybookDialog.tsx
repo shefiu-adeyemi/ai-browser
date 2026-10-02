@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X, Trash2, BookMarked, History as HistoryIcon, Pencil, AlertTriangle } from 'lucide-react'
 import type { DamagedPlaybook, PlaybookSummary, ScheduleView } from '@/types'
 import Editor from './playbook/Editor'
@@ -7,6 +7,7 @@ import RunForm from './playbook/RunForm'
 import ScheduleForm from './playbook/ScheduleForm'
 import Schedules from './playbook/Schedules'
 import { errText, readJson, reasonOf } from './playbook/shared'
+import { PickContext } from './playbook/pick'
 
 interface Props {
   onClose: () => void
@@ -39,6 +40,8 @@ const TITLE: Record<View['kind'], string> = {
 export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props) {
   const [view, setView] = useState<View>({ kind: 'library' })
   const dialogRef = useRef<HTMLDivElement>(null)
+  const [picking, setPicking] = useState<{ label: string; cancel: () => void } | null>(null)
+  const pickControl = useMemo(() => ({ begin: (label: string, cancel: () => void) => setPicking({ label, cancel }), end: () => setPicking(null) }), [])
 
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null
@@ -63,8 +66,15 @@ export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props
   const library = () => setView({ kind: 'library' })
 
   return (
+    <PickContext.Provider value={pickControl}>
+    {picking && (
+      <div role="status" className="fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full bg-gray-900 px-4 py-2 text-xs text-white shadow-lg">
+        <span>{picking.label}</span>
+        <button onClick={picking.cancel} className="rounded-full bg-white/15 px-2.5 py-0.5 font-medium hover:bg-white/25">Cancel</button>
+      </div>
+    )}
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 ${picking ? 'hidden' : ''}`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div
@@ -136,6 +146,7 @@ export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props
         {view.kind === 'history' && <History id={view.id} name={view.name} onBack={library} onEdit={() => setView({ kind: 'edit', id: view.id })} />}
       </div>
     </div>
+    </PickContext.Provider>
   )
 }
 

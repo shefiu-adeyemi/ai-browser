@@ -8,7 +8,7 @@ approves it themselves, the same as for a recording. Nothing in a template is se
 from typing import Callable
 
 import playbook as pbk
-from playbook import Check, Playbook, Source, Step, Variable
+from playbook import Check, Playbook, ScrapeField, Source, Step, Variable
 
 
 def _linkedin_profile() -> Playbook:
@@ -31,9 +31,23 @@ def _web_search() -> Playbook:
         source=Source(kind="manual", task="Template: search the web"))
 
 
+def _headlines() -> Playbook:
+    return Playbook(
+        name="Read the Hacker News front page",
+        description="Reads the title and link of every story on the front page into a table. No AI, no inputs: "
+                    "a starting point for reading any list on a page (edit the selectors for another site).",
+        steps=[Step(id="s1", kind="open", url="https://news.ycombinator.com/", note="Open the front page"),
+               Step(id="s2", kind="scrape", row_selector="tr.athing", note="Read the stories", max_rows=60,
+                    fields=[ScrapeField(name="Rank", selector=".rank", type="number"),
+                            ScrapeField(name="Title", selector=".titleline > a", type="text"),
+                            ScrapeField(name="Link", selector=".titleline > a", type="link")])],
+        source=Source(kind="manual", task="Template: read a list into a table"))
+
+
 _TEMPLATES: dict[str, tuple[str, str, Callable[[], Playbook]]] = {
     "linkedin_profile": ("Open a LinkedIn profile", "One step, no AI. The inputs are the profile addresses.", _linkedin_profile),
     "web_search": ("Search the web", "One step, no AI. The input is what to search for.", _web_search),
+    "headlines": ("Read a list into a table", "Reads the Hacker News front page into rows. No AI, no inputs.", _headlines),
 }
 
 

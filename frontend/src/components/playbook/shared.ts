@@ -18,7 +18,7 @@ export function errText(e: unknown): string {
 
 export const KIND_LABEL: Record<string, string> = {
   open: 'Open page', search: 'Search', back: 'Go back', click: 'Click', type: 'Type', select: 'Choose option',
-  key: 'Press keys', scroll: 'Scroll', wait: 'Wait', tab: 'Tab', handoff: 'Your turn', approve: 'Ask you first', input: 'Ask you for text',
+  key: 'Press keys', scroll: 'Scroll', wait: 'Wait', tab: 'Tab', handoff: 'Your turn', approve: 'Ask you first', input: 'Ask you for text', scrape: 'Read a table', foreach: 'For each row',
   extract: 'Read page', ai: 'AI step',
 }
 
@@ -60,6 +60,8 @@ export function stepDetail(s: PlaybookStep): string {
     case 'handoff': return s.message ?? ''
     case 'approve':
     case 'input': return s.message ?? ''
+    case 'foreach': return `${s.column ?? ''} of ${s.source ?? ''}, repeat the next ${s.body ?? 1}`
+    case 'scrape': return `${(s.fields ?? []).map((f) => f.name).join(', ')}${s.row_selector ? ` (one row per ${s.row_selector})` : ''}`
     case 'extract':
     case 'ai': return s.query ?? ''
     default: return ''
@@ -159,4 +161,70 @@ export function stopAskingForText(pb: Playbook, name: string, original: string):
     .filter((s) => !(s.kind === 'input' && s.variable === name))
     .map((s) => (s.kind === 'type' && s.text === `{{${name}}}` ? { ...s, text: original } : s))
   return { ...pb, steps, variables: pb.variables.filter((v) => v.name !== name) }
+}
+
+export const MAX_LOOP_ROWS = 50
+
+/** The steps a for-each step repeats: the ones right after it. */
+export function loopBody(steps: PlaybookStep[], index: number): PlaybookStep[] {
+  const s = steps[index]
+  return s?.kind === 'foreach' ? steps.slice(index + 1, index + 1 + (s.body ?? 0)) : []
+}
+
+function hostOf(url: string | null | undefined): string {
+  try { return new URL(url ?? '').hostname } catch { return '' }
+}
+
+/**
+ * Add the usual loop at the end: for each link in the last table, open it and read the page. Returns null when
+ * there is no table step to loop over. The loop variable is a web address limited to the site of the first page opened
+ * (an empty list if that is not a plain address, which the checker then asks the user to fill in).
+ */
+export function addLoop(pb: Playbook): Playbook | null {
+  let at = -1
+  pb.steps.forEach((s, i) => { if (s.kind === 'scrape') at = i })
+  if (at < 0) return null
+  const table = pb.steps[at]
+  const fields = table.fields ?? []
+  const column = (fields.find((f) => f.type === 'link') ?? fields[0])?.name
+  if (!column) return null
+  let n = 1
+  while (pb.variables.some((v) => v.name === (n === 1 ? 'item' : `item_${n}`))) n += 1
+  const name = n === 1 ? 'item' : `item_${n}`
+  const first = nextNumber(pb.steps.map((x) => x.id), 's')
+  const host = hostOf(pb.steps.find((x) => x.kind === 'open')?.url)
+  const base = { tag: 'deterministic' as const, note: '', ask: false }
+  const steps: PlaybookStep[] = [
+    { ...base, id: `s${first}`, kind: 'foreach', note: 'For each row', source: table.id, column, variable: name, body: 2, max_rows: null, on_failure: 'skip' },
+    { ...base, id: `s${first + 1}`, kind: 'open', note: 'Open each page', url: `{{${name}}}` },
+    { ...base, id: `s${first + 2}`, kind: 'scrape', note: 'Read each page', row_selector: null, max_rows: null, fields: [{ name: 'Name', selector: '', type: 'text' }] },
+  ]
+  return {
+    ...pb, steps: [...pb.steps, ...steps],
+    variables: [...pb.variables, { name, type: 'url', label: '', required: true, loop: true, allowed_hosts: host ? [host] : [] }],
+  }
+}
+
+/** "a, b ,A" becomes ["a", "b"]: trimmed, no empties, no repeats (ignoring case). */
+export function splitList(text: string): string[] {
+  const seen = new Set<string>()
+  return text.split(/[,\n]/).map((t) => t.trim()).filter((t) => {
+    const k = t.toLowerCase()
+    if (!t || seen.has(k)) return false
+    seen.add(k)
+    return true
+  })
+}
+
+export const NO_WATCH: import('@/types').WatchSettings = {
+  enabled: false, key_columns: [], ignore_columns: [], ignore_patterns: [], min_change_percent: 0,
+  report_added: true, report_removed: true, report_changed: true,
+}
+
+export const WATCH_LABEL: Record<string, { label: string; cls: string }> = {
+  changed: { label: 'Changed', cls: 'bg-amber-50 text-amber-700' },
+  baseline: { label: 'First look', cls: 'bg-blue-50 text-blue-700' },
+  reset: { label: 'New comparison', cls: 'bg-blue-50 text-blue-700' },
+  unchanged: { label: 'No change', cls: 'bg-gray-100 text-gray-600' },
+  skipped: { label: 'Not compared', cls: 'bg-gray-100 text-gray-600' },
 }

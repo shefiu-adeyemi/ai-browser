@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle2, XCircle, AlertTriangle, StopCircle } from 'lucide-react'
 import type { PlaybookRunRecord, PlaybookRunSummary } from '@/types'
-import { KIND_LABEL, errText, formatWhen, readJson, reasonOf } from './shared'
+import { KIND_LABEL, WATCH_LABEL, errText, formatWhen, readJson, reasonOf } from './shared'
+import ResultTable from './ResultTable'
+import ChangeList from './ChangeList'
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   done: { label: 'Done', cls: 'bg-green-50 text-green-700' },
@@ -70,6 +72,7 @@ export default function History({ id, name, onBack, onEdit }: { id: string; name
             <span className="text-xs text-gray-500">{formatWhen(open.started_at)} · {open.seconds}s · version {open.playbook_version}</span>
           </div>
           {open.error && <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-700">{open.error}</p>}
+          {open.watch && <ChangeList watch={open.watch} />}
           {open.screenshot && (
             <div>
               <p className="text-xs font-medium text-gray-700">What the page looked like when it stopped</p>
@@ -106,10 +109,11 @@ export default function History({ id, name, onBack, onEdit }: { id: string; name
               </li>
             ))}
           </ol>
-          {open.outputs?.map((o) => (
-            <div key={o.step_id} className="rounded-lg bg-gray-50 px-3 py-2">
+          {open.outputs?.map((o, i) => (
+            <div key={`${o.step_id}-${i}`} className="rounded-lg bg-gray-50 px-3 py-2">
               <p className="text-xs font-medium text-gray-700">{o.query || 'Result'}</p>
-              <p className="mt-1 whitespace-pre-wrap break-words text-xs text-gray-600">{o.text}</p>
+              {o.table ? <div className="mt-1"><ResultTable table={o.table} /></div>
+                : <p className="mt-1 whitespace-pre-wrap break-words text-xs text-gray-600">{o.text}</p>}
             </div>
           ))}
           {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
@@ -130,7 +134,10 @@ export default function History({ id, name, onBack, onEdit }: { id: string; name
         <div className="mb-2 flex items-center justify-between gap-3">
           <p className="text-xs text-gray-500">Runs of "{name}", newest first.</p>
           {runs !== null && runs.length > 0 && (
-            <a href={`/playbooks/${id}/results.csv`} download className="flex-shrink-0 text-xs text-brand hover:underline">Download results (CSV)</a>
+            <span className="flex flex-shrink-0 gap-3">
+              <a href={`/playbooks/${id}/results.csv`} download className="text-xs text-brand hover:underline">Download results (CSV)</a>
+              <a href={`/playbooks/${id}/results.json`} download className="text-xs text-brand hover:underline">JSON</a>
+            </span>
           )}
         </div>
         {error && <p role="alert" className="mb-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
@@ -144,7 +151,12 @@ export default function History({ id, name, onBack, onEdit }: { id: string; name
                   <p className="text-xs text-gray-900">{formatWhen(r.started_at)} · {r.ok_steps}/{r.steps} steps · {r.seconds}s{!r.attended ? ' · scheduled' : ''}</p>
                   {r.error && <p className="truncate text-[11px] text-gray-500">{r.error}</p>}
                 </div>
-                <StatusBadge status={r.status} />
+                <span className="flex flex-shrink-0 items-center gap-1.5">
+                  {r.watch && WATCH_LABEL[r.watch] && r.watch !== 'skipped' && (
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${WATCH_LABEL[r.watch].cls}`}>{WATCH_LABEL[r.watch].label}</span>
+                  )}
+                  <StatusBadge status={r.status} />
+                </span>
               </button>
             </li>
           ))}

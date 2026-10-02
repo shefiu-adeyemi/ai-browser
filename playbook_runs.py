@@ -26,7 +26,7 @@ from playbook_store import PlaybookStore
 log = logging.getLogger(__name__)
 
 _RUN_ID_RE = re.compile(r"^run_[0-9a-f]{12}$")
-KEEP_PER_PLAYBOOK = 50
+KEEP_PER_PLAYBOOK = 500       # a batch of a few hundred rows keeps every row until the retention period removes it
 
 
 class RunStore:
@@ -119,7 +119,8 @@ class RunStore:
                 rows.append({k: rec.get(k) for k in ("run_id", "status", "started_at", "finished_at", "seconds",
                                                     "attended", "error", "playbook_version")}
                             | {"steps": len(rec.get("steps", [])), "ok_steps": sum(
-                                1 for s in rec.get("steps", []) if s.get("status") == "ok")})
+                                1 for s in rec.get("steps", []) if s.get("status") == "ok"),
+                               "watch": str((rec.get("watch") or {}).get("status", "")) if isinstance(rec.get("watch"), dict) else ""})
         rows.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
         return rows[:limit]
 

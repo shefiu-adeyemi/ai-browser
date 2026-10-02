@@ -289,3 +289,117 @@ to happen (and the text just typed), before the step that follows. In the editor
   caught every change.
 
 Not built: answering from outside the app (email/phone), by design for now.
+
+## Phase 5 status: scrape to table (built and tested)
+A new step kind, **Read a table** (`scrape`), reads data off the page with **no AI and no clicking**:
+- **Rows and columns.** A *row selector* (CSS) picks each repeated item (a table row, a card, a search result);
+  each *column* has a name, a selector inside the row (`:scope` = the row itself) and a kind: text, number
+  ("$1,299.50" becomes 1299.5), link (absolute web address; `javascript:` and other schemes are dropped) or an
+  attribute (e.g. `data-id`). With no row selector the page gives one record. Up to 30 columns and 500 rows per
+  step (default 100); at most 20,000 cells and 500 characters per cell are kept, and the table says when the page
+  had more than was read.
+- **Safe by construction.** The page script only reads (`querySelectorAll`, `querySelector`, text, `href`,
+  `getAttribute`). Selectors are passed to it as data, never pasted into it. The selectors and columns are part of
+  what the user approves (change one and the approval is lost). Reading is not an "ask" action and needs no model.
+- **Honest failures.** A page that is still loading gets a few seconds. No rows at all, or a column that matched
+  nothing in any row, FAILS the run and names the selector ("the page may have changed"); it never reports an
+  empty table as success. A bad selector is reported in words.
+- **Results.** The table is stored with the run, shown in the run history, and the first rows appear in the chat.
+  `results.csv` becomes one combined table across runs (one line per scraped row, with that run's inputs beside it, so
+  a batch of 30 profiles is one spreadsheet; spreadsheet formulas in cells are neutralised) and `results.json`
+  gives the same for another program. A playbook keeps its last 500 runs (it was 50) so a big batch isn't lost.
+- **Editor.** "Add a step that reads a table", a column editor, and **Test on the page in the browser**: it reads
+  the page the browser is showing and previews up to 10 rows (never navigates, clicks or types, and only when no
+  task is running). A ready-made template, "Read a list into a table" (Hacker News front page), starts it off.
+- **Batch.** Scheduled runs over a list of inputs already run one row at a time with the daily limits, so scraping
+  a list of pages or profiles works through the existing schedules.
+- Tests: `test_playbook_scrape.py` (cleaning, failure rules, format), `test_playbook_player.py` (ScrapeStep),
+  `test_templates_export.py` (tables in CSV/JSON), `test_scrape_app.py` (preview and API), frontend
+  `ScrapeEditor.test.tsx`, and nine opt-in real-Chromium tests (`test_scrape_browser.py`: cleaning, links and
+  attributes, one record, a page that fills in late, a changed page, a bad selector, the row limit, read-only,
+  the preview). A 24-item mutation check (break one piece, a test must fail) caught every change.
+
+### Phase 5 additions: picking, AI suggestions and batch inputs (built and tested)
+- **Click to pick.** In the step editor, "Pick on the page" puts a small outline overlay on the page in the browser (the
+  dialog steps aside, a bar with Cancel stays): hover to see what you would pick, click one item of the list and the
+  rows are found for you, with the other sizes offered ("not the right rows?"); then a pick button per column reads
+  the value you click inside one row, picks a selector relative to the row, guesses text / number / link, names the
+  column from its class and tells you if it is found in only some rows. Clicks are swallowed while picking, so the
+  page does not react; the overlay is removed on finish or cancel and removes itself after five minutes. Anything the
+  page reports back is treated as untrusted and cut to size. It cannot see into iframes or shadow DOM (nor can the
+  reading step).
+- **Suggest with AI.** Describe what you want ("the product names and prices") and your model proposes the row and column
+  selectors from a short outline of the page (no scripts, styles, images or typed values; link query strings
+  removed; repeated items collapsed; about 12,000 characters at most). The page text is marked as data the model must
+  not obey, and the model can only answer with a row selector and columns. The proposal is TRIED on the page; columns
+  that find nothing are dropped and said; you see the rows and press "Use this" (nothing changes before). It uses the
+  new "selectors" job of the model router (Standard tier by default) and is counted in the usage ledger.
+- **Batch inputs.** A schedule's rows can come from a CSV file or pasted spreadsheet rows (a header row picks the
+  columns by input name or label; without one, columns go in order; at most 200 rows and 1 MB), or from a column of
+  another playbook's scraped results (each value once). "Check the first 3 rows" is a dry run that opens no browser:
+  it validates every row, shows exactly what the first three would do (a stored secret stays a placeholder) and says
+  how many days the daily limits will spread the batch over.
+- **Tests.** `test_playbook_picker.py`, `test_playbook_suggest.py`, `test_batch_check.py`, frontend `csv.test.ts`,
+  `BatchInputs.test.tsx`, `ScrapePick.test.tsx`, `ScrapeSuggest.test.tsx`, and 12 more opt-in real-Chromium tests
+  (`test_scrape_browser.py`: picking cards and table rows, columns, links, clicks outside rows, the page not
+  reacting while picking, the digest leaking nothing, a suggestion read end to end). A 35-item mutation check caught
+  every change (it found two pieces of redundant code, which were simplified, and two untested messages).
+
+### Phase 5 limits closed: shadow DOM, iframes and "for each row" (built and tested)
+- **Shadow DOM and iframes.** A selector may step INTO an open shadow root or a same-site iframe with `>>>`
+  (`#host >>> li.item`, `#frame >>> div.row`, as deep as the page goes). The reader, the click-to-pick tool and the
+  outline sent to the AI all understand it: picking inside a shadow root or a frame produces the right `>>>` selector, and
+  the AI is told when and how to use it. An iframe from another site cannot be entered (the page cannot see into it), so
+  nothing is found there, and a closed shadow root is not reachable. A selector without `>>>` behaves as before.
+- **For each row** (`foreach` step). Takes a column of an earlier "read a table" step and runs the next 1 to 20 steps once
+  per value, with the value in a loop variable (`{{item}}`). The typical use: read a list, open each link, read the detail
+  page; every table read inside the loop gets the loop value as its first column, so the combined CSV shows which row
+  each line came from. Rules, all checked when the playbook is saved and again as it runs:
+  - values come from a page, so each is checked against the loop variable before it is used (a web address must be on the
+    sites the variable allows; a number must be a number); ones that fail are left out and said, and if none pass the run
+    fails without visiting anything; repeated and empty values are used once or not at all;
+  - at most 50 rows (default 20), a 1.5 s pause between rows, and the whole run keeps at most 60,000 table cells;
+  - only plain steps may be inside a loop (open, search, back, click, type, select, key, scroll, wait, tab, read a table):
+    nothing that sends or asks first, no AI steps, no nested loops, and not on LinkedIn (its visits are paced and capped,
+    so use a schedule with one row per profile there);
+  - "if a row fails": stop the run (default) or skip that row. A sign-in wall, a page off the approved sites, a refused
+    action or the time limit always stop the run, never skipped;
+  - the loop variable's type and sites, the column, the source and the number of steps are all part of the approval.
+- **Editor.** "Add a loop: open each link and read it" adds the whole pattern in one click (a web-address variable limited to
+  the site of the first page); the loop step has controls for the table and column, how many steps repeat (and lists them),
+  what each value is and which sites it may open, the row limit and what a failing row does.
+- **Tests.** `test_foreach.py` (39: format rules, the loop, limits, failures, budgets), `test_playbook_scrape.py` (arrows),
+  frontend `ForEach.test.tsx`, and real-Chromium tests for shadow roots, nested shadow roots, iframes, picking inside
+  them, the page outline, and a loop over a real list of people (off-site link refused, a bad row skipped, the combined CSV).
+
+Not built: change monitoring on a scraped table (phase 6), and Google Sheets or webhook export (explicit opt-in, later).
+
+## Phase 6 status: change monitoring (built and tested)
+A schedule can **watch** what its playbook reads and tell you only when it changed. Unchanged runs cost nothing and say
+nothing (no model is involved at any point).
+- **Setting it up.** In the schedule form, "Watch for changes" (shown for playbooks with a "read a table" step; off by default):
+  the columns that identify a row (default: the first column not left out), columns to leave out, patterns to cut out of every
+  cell before comparing (for "3 minutes ago" or a counter; patterns that could hang are refused), the smallest change worth
+  hearing about for numbers (in percent), and which kinds of change to report (new rows, gone rows, changed values).
+- **What is compared.** Each run's tables are compared with the last snapshot of the same schedule and the same inputs (a schedule over
+  30 pages watches 30 things, each with its own history). Rows are matched by key, so a price that moved is one changed row, not
+  one gone and one new. One record both times (a profile, a product page) is the same record: what in it moved is the change. Row
+  order and extra spaces are not changes. Tables are matched by their step, so a loop's pages are matched by their loop value.
+- **Honest about noise and drift.** Small number moves under your minimum are ignored, but the reference snapshot stays put, so
+  small moves add up and are reported once they pass the minimum. Changing the watch settings starts a new comparison (said once)
+  instead of a wrong diff. A run with a failed step, or that read no table, is not compared and does not spoil the reference.
+  If a run worked but nothing could be compared, you are told (at most once a day) so you don't believe it is being watched.
+- **What you hear.** One message per batch: "Changed: <schedule>" with what changed ("Ann: Price 5 → 6; New: Dee; Gone: Bob"), or
+  "3 of 30 changed" with the first few rows; "Now watching" the first time. A watching schedule does not announce "all rows ran".
+  The run history marks each run (First look, Changed, No change) and shows every changed, new and gone row; the schedule list shows the
+  last change.
+- **Where it is kept.** The last 10 snapshots per schedule and inputs, in `watch_snapshots` in the data folder, pruned with the 30-day
+  retention and removed with the playbook. They hold what was scraped, so treat them as you do the run history. Only scheduled runs
+  are compared (a manual run neither compares nor changes the reference).
+- **Tests.** `test_monitor.py` (settings, comparing, reporting), `test_snapshots.py`, `test_watcher.py`, `test_watch_app.py` (the
+  scheduler, notifications, API), frontend `Watch.test.tsx`, and real-Chromium tests (`test_watch_browser.py`: a price page that changes
+  between scheduled runs, a stamp that changes by itself, a page that breaks). The real page found one bug the fakes missed (a
+  one-record table keyed by its own value), fixed above.
+
+Not built: a model-written summary of a change (only when something changed), email/Telegram/webhook delivery (inbox and desktop only
+for now), and a graph of a value over time.

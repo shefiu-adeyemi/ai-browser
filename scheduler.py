@@ -51,6 +51,7 @@ class Outcome:
     run_id: str = ""
     detail: str = ""
     waiting: Optional[dict] = None     # for "waiting": message, detail, url, step_id, timeout_minutes
+    watch: Optional[dict] = None       # for a watched run: {"status": baseline|unchanged|changed|reset|skipped, "summary": ...}
 
 
 Notify = Callable[..., Awaitable[None]]
@@ -300,7 +301,9 @@ class Scheduler:
                           skipped: frozenset = frozenset()) -> bool:
         if acts is not None:
             self.limits.record(acts, now)
-        result = sch.BatchResult(index=row, status=outcome.status, run_id=outcome.run_id, detail=outcome.detail[:300])
+        w = outcome.watch or {}
+        result = sch.BatchResult(index=row, status=outcome.status, run_id=outcome.run_id, detail=outcome.detail[:300],
+                                 watch=str(w.get("status", ""))[:12], change=str(w.get("summary", ""))[:300])
         waiting = outcome.status == "waiting" and outcome.waiting and pb is not None
         ok = outcome.status == "done" or bool(waiting)           # parked is not a failure: it is waiting for a yes
         stop = outcome.status == "stopped" or (not ok and s.on_failure == "stop")
@@ -365,14 +368,43 @@ class Scheduler:
                             f'"{s.name}": {len(bad)} of {len(results)} need you',
                             f"Row {first.index + 1}: {first.detail or first.status}. The others ran.",
                             schedule_id=s.id, playbook_id=s.playbook_id, run_id=first.run_id)
-        elif not bad and len(results) > 1:
+        elif not bad and len(results) > 1 and not s.watch.enabled:       # a watch speaks up only for a change, not to say "all ran"
             declined = sum(1 for r in results if r.status == "declined")
             ran = len(results) - declined
             await self._say("info", f'Finished: "{s.name}"',
                             f"All {ran} rows ran." if not declined else f"{ran} ran and you said no to {declined}.",
                             schedule_id=s.id, playbook_id=s.playbook_id)
+        if s.watch.enabled and not stopped_by_user:
+            await self._tell_changes(s, results)
         if sch.parse_iso(s.state.next_run) is None and s.cadence.kind == "once":
             self._set_state(s.id, lambda x: x.model_copy(update={"next_run": None}))
+
+    async def _tell_changes(self, s: Schedule, results: list) -> None:
+        """One message for a whole batch: what changed (or that watching has started). Unchanged says nothing."""
+        changed = sorted((r for r in results if r.watch == "changed"), key=lambda r: r.index)
+        n = len(results)
+        if changed:
+            lines = [f"Row {r.index + 1}: {r.change}" if n > 1 else r.change for r in changed[:5]]
+            more = f" And {len(changed) - 5} more." if len(changed) > 5 else ""
+            text = (" ".join(lines) + more).strip()[:900]
+            title = f'Changed: "{s.name}"' if n == 1 else f'{len(changed)} of {n} changed: "{s.name}"'
+            now = sch.iso(self._now()) or ""
+            self._set_state(s.id, lambda x: x.model_copy(update={"last_change": text[:400], "last_change_at": now}))
+            await self._say("warning", title, text, schedule_id=s.id, playbook_id=s.playbook_id, run_id=changed[0].run_id)
+        elif results and all(r.watch == "skipped" and r.status == "done" for r in results):
+            # it ran, but nothing could be compared: say so, or the user believes it is being watched (at most once a day)
+            last = sch.parse_iso(s.state.watch_warned_at)
+            now = self._now()
+            if last is None or now - last >= timedelta(hours=24):
+                self._set_state(s.id, lambda x: x.model_copy(update={"watch_warned_at": sch.iso(now)}))
+                await self._say("warning", f'Not watched this time: "{s.name}"', (results[0].change or "Nothing could be compared.")[:400],
+                                schedule_id=s.id, playbook_id=s.playbook_id, run_id=results[0].run_id)
+        elif results and all(r.watch in ("baseline", "reset") for r in results):
+            reset = any(r.watch == "reset" for r in results)
+            await self._say("info", f'Now watching: "{s.name}"',
+                            ("The settings changed, so this look starts a new comparison. " if reset else "This first look is saved to compare with. ")
+                            + "You will hear from it only when something changes.",
+                            schedule_id=s.id, playbook_id=s.playbook_id, run_id=results[0].run_id)
 
     # ---------------------------------------------------------------- the user's answers
     def pending(self, s: Schedule) -> list[sch.ParkedRun]:

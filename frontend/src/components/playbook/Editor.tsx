@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import ScrapeEditor from './ScrapeEditor'
+import ForEachEditor from './ForEachEditor'
 import { Trash2, ShieldCheck, Sparkles, MousePointerClick, RotateCcw } from 'lucide-react'
 import type { ModelTier, Playbook, PlaybookStep, TiersInfo, VariableSuggestion } from '@/types'
-import { KIND_LABEL, TIER_LABEL, askForText, askedVariable, autoTier, errText, fetchTiers, isGuarded, readJson, stepDetail, tierModelText, stepTarget, stopAskingForText, usedVariables, reasonOf } from './shared'
+import { KIND_LABEL, TIER_LABEL, addLoop, askForText, askedVariable, autoTier, errText, fetchTiers, isGuarded, readJson, stepDetail, tierModelText, stepTarget, stopAskingForText, usedVariables, reasonOf } from './shared'
 
 interface Props {
   /** 'draft': the last finished run, not stored until saved. 'edit': a saved playbook. */
@@ -145,6 +147,21 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
     stepsChanged(playbook)
   }
 
+  const canLoop = pb.steps.some((s) => s.kind === 'scrape' && (s.fields ?? []).length > 0)
+  const addLoopSteps = () => { const next = addLoop(pb); if (next) stepsChanged(next) }
+  // what a loop variable is (its type, the sites it may open) is part of what the user approves, unlike a label
+  const changeVariable = (name: string, patch: Record<string, unknown>) =>
+    stepsChanged({ ...pb, variables: pb.variables.map((v) => (v.name === name ? { ...v, ...patch } : v)) })
+
+  const addTableStep = () => {
+    const nums = pb.steps.map((s) => Number(s.id.slice(1))).filter((n) => !Number.isNaN(n))
+    const step: PlaybookStep = {
+      id: `s${Math.max(0, ...nums) + 1}`, kind: 'scrape', tag: 'deterministic', note: 'Read a table', ask: false,
+      row_selector: null, max_rows: null, fields: [{ name: 'Name', selector: '', type: 'text' }],
+    }
+    stepsChanged({ ...pb, steps: [...pb.steps, step] })
+  }
+
   const editStep = (id: string, patch: Partial<PlaybookStep>) => {
     stepsChanged({ ...pb, steps: pb.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) })
   }
@@ -266,6 +283,11 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
                       ) : 'it is cancelled, never sent.'}
                     </label>
                   </div>
+                ) : s.kind === 'foreach' ? (
+                  <ForEachEditor steps={pb.steps} step={s} index={i} variable={pb.variables.find((v) => v.name === s.variable)}
+                    onChange={(patch) => editStep(s.id, patch)} onVariable={(patch) => changeVariable(s.variable ?? '', patch)} />
+                ) : s.kind === 'scrape' ? (
+                  <ScrapeEditor step={s} index={i} onChange={(patch) => editStep(s.id, patch)} />
                 ) : (
                   stepDetail(s) && <p className="mt-0.5 break-all text-xs text-gray-500">{stepDetail(s)}</p>
                 )}
@@ -308,6 +330,11 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
             </li>
           ))}
         </ol>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          <button onClick={addTableStep} className="text-xs text-brand hover:underline">+ Add a step that reads a table from the page</button>
+          <button onClick={addLoopSteps} disabled={!canLoop} title={canLoop ? '' : 'Add a step that reads a table first'}
+            className="text-xs text-brand hover:underline disabled:text-gray-300 disabled:no-underline">+ Add a loop: open each link and read it</button>
+        </div>
 
         {remembered.length > 0 && (
           <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
@@ -324,11 +351,11 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
           </div>
         )}
 
-        {pb.variables.some((v) => !v.runtime) && (
+        {pb.variables.some((v) => !v.runtime && !v.loop) && (
           <div>
             <p className="text-xs font-medium text-gray-700">Inputs you will fill in each time</p>
             <ul className="mt-1 space-y-2">
-              {pb.variables.filter((v) => !v.runtime).map((v) => (
+              {pb.variables.filter((v) => !v.runtime && !v.loop).map((v) => (
                 <li key={v.name} className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
                   <p><span className="font-mono">{v.name}</span> ({v.type.replace('_', ' ')})</p>
                   {mode === 'edit' ? (

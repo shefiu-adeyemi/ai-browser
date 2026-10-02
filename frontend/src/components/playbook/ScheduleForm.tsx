@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
-import type { Cadence, CadenceKind, PlaybookSummary, Playbook, ScheduleView } from '@/types'
-import { errText, readJson, reasonOf } from './shared'
+import type { Cadence, CadenceKind, PlaybookSummary, Playbook, ScheduleView, WatchSettings } from '@/types'
+import BatchInputs from './BatchInputs'
+import WatchForm from './WatchForm'
+import { NO_WATCH, errText, readJson, reasonOf } from './shared'
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
@@ -44,7 +46,7 @@ export default function ScheduleForm({ existing, onCancel, onSaved }: Props) {
   const [onFailure, setOnFailure] = useState<'stop' | 'skip'>(existing?.on_failure ?? 'stop')
   const [allowSensitive, setAllowSensitive] = useState(existing?.allow_sensitive ?? false)
   const [enabled, setEnabled] = useState(existing?.enabled ?? true)
-  const [pasted, setPasted] = useState('')
+  const [watch, setWatch] = useState<WatchSettings>(existing?.watch ?? NO_WATCH)
 
   useEffect(() => {
     let alive = true
@@ -87,23 +89,14 @@ export default function ScheduleForm({ existing, onCancel, onSaved }: Props) {
   if (!playbooks) return <p className="p-8 text-center text-xs text-gray-400">Opening…</p>
 
   const chosen = playbooks.find((p) => p.id === playbookId)
-  const variables = (pb?.variables ?? []).filter((v) => !v.runtime)       // typed in when asked, never up front
+  const variables = (pb?.variables ?? []).filter((v) => !v.runtime && !v.loop)       // typed in when asked, never up front
   const askCount = pb ? pb.steps.filter((s, i) => s.ask && !(i > 0 && pb.steps[i - 1].kind === 'approve')).length : 0
   const guardedCount = pb ? pb.steps.filter((s, i) => s.ask && i > 0 && pb.steps[i - 1].kind === 'approve').length : 0
   const handoffs = pb ? pb.steps.filter((s) => s.kind === 'handoff').length : 0
+  const readsTable = !!pb && pb.steps.some((s) => s.kind === 'scrape')
 
   const setCell = (i: number, key: string, value: string) =>
     setRows(rows.map((r, n) => (n === i ? { ...r, [key]: value } : r)))
-
-  const addPasted = () => {
-    const first = variables[0]
-    if (!first) return
-    const lines = pasted.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
-    if (lines.length === 0) return
-    const keep = rows.filter((r) => Object.values(r).some((v) => v.trim() !== ''))
-    setRows([...keep, ...lines.map((l) => ({ [first.name]: l }))])
-    setPasted('')
-  }
 
   const buildCadence = (): Cadence => {
     const kind = when as CadenceKind
@@ -123,6 +116,7 @@ export default function ScheduleForm({ existing, onCancel, onSaved }: Props) {
           schedule: {
             id: existing?.id, name, playbook_id: playbookId, enabled, cadence: buildCadence(),
             items: variables.length === 0 ? [{}] : rows, on_failure: onFailure, allow_sensitive: allowSensitive,
+            watch: { ...watch, enabled: watch.enabled && readsTable },
           },
         }),
       })
@@ -219,14 +213,13 @@ export default function ScheduleForm({ existing, onCancel, onSaved }: Props) {
               ))}
               <button type="button" onClick={() => setRows([...rows, {}])} className="inline-flex items-center gap-1 text-xs text-brand"><Plus size={12} /> Add a row</button>
             </div>
-            <details className="mt-2">
-              <summary className="cursor-pointer text-xs text-gray-500">Paste a list</summary>
-              <textarea value={pasted} onChange={(e) => setPasted(e.target.value)} rows={4} placeholder={`One ${variables[0].label || variables[0].name} per line`}
-                className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 text-xs focus:border-brand focus:outline-none" />
-              <button type="button" onClick={addPasted} className="mt-1 rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50">Add these as rows</button>
-              {variables.length > 1 && <span className="ml-2 text-[11px] text-gray-400">Fills "{variables[0].label || variables[0].name}"; fill the others in the table.</span>}
-            </details>
+            <BatchInputs playbookId={playbookId} variables={variables} rows={rows} setRows={setRows} />
           </div>
+        )}
+
+        {pb && (
+          <WatchForm value={watch} onChange={setWatch}
+            unavailable={readsTable ? '' : 'Watching needs a playbook with a step that reads a table. Add one in the playbook editor first.'} />
         )}
 
         <fieldset>

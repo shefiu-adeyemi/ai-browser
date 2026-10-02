@@ -37,6 +37,7 @@ PLAYBOOK_RUNS_DIR    = DATA_DIR / "playbook_runs"
 SCHEDULES_FILE       = DATA_DIR / "schedules.json"
 SITE_LIMITS_FILE     = DATA_DIR / "site_limits.json"
 REMEMBERED_ANSWERS_FILE = DATA_DIR / "remembered_answers.json"
+SNAPSHOTS_DIR       = DATA_DIR / "watch_snapshots"
 NOTIFICATIONS_FILE   = DATA_DIR / "notifications.json"
 UI_PROFILE_DIR       = DATA_DIR / "profiles" / "ui"          # browser used by the web UI
 LINKEDIN_PROFILE_DIR = DATA_DIR / "profiles" / "linkedin"    # browser used by linkedin_agent.py

@@ -208,7 +208,7 @@ class PlaybookApi(unittest.TestCase):
     # ------------------------------------------------------------------------ templates
     def test_templates_are_listed_and_create_an_unapproved_playbook(self):
         listed = self.c.get("/playbooks/templates").json()["templates"]
-        self.assertEqual({t["id"] for t in listed}, {"linkedin_profile", "web_search"})
+        self.assertEqual({t["id"] for t in listed}, {"linkedin_profile", "web_search", "headlines"})
         r = self.c.post("/playbooks/from-template", json={"id": "linkedin_profile"})
         self.assertEqual(r.status_code, 200, r.text)
         pb = r.json()["playbook"]

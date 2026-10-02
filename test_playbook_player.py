@@ -9,6 +9,7 @@ import playbook as pbk
 from playbook import Check, Fingerprint, Playbook, Step, Variable
 from playbook_match import Candidate
 from playbook_player import PlaybookPlayer, StepApprover, summarize
+import playbook_scrape as ps
 
 
 class Clock:
@@ -58,8 +59,17 @@ class FakePage:
         self.raise_on: str | None = None
         self.extract_text = "Jane Doe, Engineer"
         self.tab_ids = ["AAAA", "BBBB", "CCCC"]
+        self.scrape_answers: list = []            # what each read of the page gives (the last one repeats)
+        self.scrape_calls: list = []
         self.settled = 0
         self.settle_error: BaseException | None = None
+
+    async def scrape(self, row_selector, fields, max_rows):
+        self.scrape_calls.append((row_selector, [dict(f) for f in fields], max_rows))
+        answer = self.scrape_answers[0] if len(self.scrape_answers) <= 1 else self.scrape_answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
     async def candidates(self): return list(self.elements)
     async def url(self): return self.url_
@@ -871,6 +881,92 @@ class InputsDuringTheRun(PlayerCase):
         self.form_page(attended=False)
         r = await self.player.run(self.code_pb("number"), {"who": "Jane"}, answers={"s2": "not a number"})
         self.assertEqual(r.status, "failed")
+
+
+class ScrapeStep(PlayerCase):
+    FIELDS = [pbk.ScrapeField(name="Name", selector=".n"), pbk.ScrapeField(name="Price", selector=".p", type="number")]
+
+    def pb(self, **kw):
+        step = dict(row_selector="tr.item", fields=self.FIELDS, note="The items")
+        step.update(kw)
+        return make_pb([S(1, "open", url="https://a.com/"), S(2, "scrape", **step)])
+
+    GOOD = {"total": 2, "rows": [["Ann", "$5.00"], ["Bob", "7"]]}
+
+    async def test_a_table_is_read_without_a_model_and_kept_in_the_results(self):
+        page = self.build()
+        page.has_llm = False
+        page.scrape_answers = [self.GOOD]
+        r = await self.run_pb(self.pb())
+        self.assertEqual(r.status, "done", r.error)
+        self.assertEqual(page.scrape_calls, [("tr.item", [{"name": "Name", "selector": ".n", "type": "text", "attr": None},
+                                                         {"name": "Price", "selector": ".p", "type": "number", "attr": None}], None)])
+        (out,) = r.outputs
+        self.assertEqual(out["table"]["columns"], ["Name", "Price"])
+        self.assertEqual(out["table"]["rows"], [["Ann", "5"], ["Bob", "7"]])
+        self.assertEqual((out["step_id"], out["query"], out["text"]), ("s2", "The items", "2 rows read"))
+        self.assertNotIn("table", r.to_dict()["steps"][1])                       # the table is stored once, in the outputs
+
+    async def test_it_is_not_an_action_so_nothing_is_asked(self):
+        page = self.build(attended=False)
+        page.scrape_answers = [self.GOOD]
+        r = await self.run_pb(self.pb())
+        self.assertEqual((r.status, self.inner.asked), ("done", []))
+        self.assertEqual([a[0] for a in page.actions], ["navigate"])             # nothing was clicked or typed
+
+    async def test_the_chat_shows_the_first_rows(self):
+        page = self.build()
+        page.scrape_answers = [{"total": 8, "rows": [[f"N{i}", str(i)] for i in range(8)]}]
+        pb = self.pb()
+        r = await self.run_pb(pb)
+        text = summarize(pb, r)
+        self.assertIn("Name | Price", text)
+        self.assertIn("N0 | 0", text)
+        self.assertIn("and 3 more", text)
+
+    async def test_a_page_that_is_still_loading_gets_a_few_seconds(self):
+        page = self.build()
+        page.scrape_answers = [{"total": 0, "rows": []}, {"total": 0, "rows": []}, self.GOOD]
+        r = await self.run_pb(self.pb())
+        self.assertEqual((r.status, len(page.scrape_calls)), ("done", 3))
+
+    async def test_rows_that_never_appear_fail_and_say_so(self):
+        page = self.build()
+        page.scrape_answers = [{"total": 0, "rows": []}]
+        r = await self.run_pb(self.pb())
+        self.assertEqual(r.status, "failed")
+        self.assertIn("No rows were found", r.steps[1].detail)
+        self.assertEqual(r.outputs, [])
+
+    async def test_a_selector_that_matches_nothing_names_it(self):
+        page = self.build()
+        page.scrape_answers = [{"total": 2, "rows": [["Ann", None], ["Bob", None]]}]
+        r = await self.run_pb(self.pb())
+        self.assertEqual(r.status, "failed")
+        self.assertIn('".p"', r.steps[1].detail)
+
+    async def test_a_bad_selector_or_a_dead_page_is_a_plain_failure(self):
+        for err in (ps.ScrapeError("A selector is not valid: x"), asyncio.TimeoutError()):
+            page = self.build()
+            page.scrape_answers = [err]
+            r = await self.run_pb(self.pb())
+            self.assertEqual(r.status, "failed")
+            self.assertTrue(r.steps[1].detail)
+
+    async def test_a_scrape_after_a_sign_in_wall_is_not_read(self):
+        page = self.build(url="https://a.com/")
+        page.scrape_answers = [self.GOOD]
+        page.redirect["https://a.com/"] = "https://a.com/login"
+        r = await self.run_pb(self.pb())
+        self.assertNotEqual(r.status, "done")
+
+    async def test_the_run_stops_if_the_page_left_the_approved_sites(self):
+        page = self.build()
+        page.scrape_answers = [self.GOOD]
+        page.redirect["https://a.com/"] = "https://evil.com/"
+        r = await self.run_pb(self.pb())
+        self.assertEqual(r.status, "failed")
+        self.assertIn("not approved to visit", str(r.error) + " ".join(s.detail for s in r.steps))
 
 
 class SkipWhenUnanswered(PlayerCase):

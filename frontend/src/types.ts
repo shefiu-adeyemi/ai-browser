@@ -146,7 +146,7 @@ export interface PlaybookFingerprint {
 
 export interface PlaybookStep {
   id: string
-  kind: 'open' | 'search' | 'back' | 'click' | 'type' | 'select' | 'key' | 'scroll' | 'wait' | 'tab' | 'handoff' | 'approve' | 'input' | 'extract' | 'ai'
+  kind: 'open' | 'search' | 'back' | 'click' | 'type' | 'select' | 'key' | 'scroll' | 'wait' | 'tab' | 'handoff' | 'approve' | 'input' | 'scrape' | 'foreach' | 'extract' | 'ai'
   tag: 'deterministic' | 'ai'
   note: string
   url?: string | null
@@ -160,12 +160,29 @@ export interface PlaybookStep {
   close_tab?: boolean
   timeout_minutes?: number | null
   on_timeout?: 'cancel' | 'skip' | null
+  row_selector?: string | null
+  max_rows?: number | null
+  fields?: ScrapeField[] | null
+  source?: string | null
+  column?: string | null
+  body?: number | null
+  on_failure?: 'stop' | 'skip' | null
   variable?: string | null
   tier?: ModelTier | null         // AI steps: which model tier reads the page (null = automatic)
   ask: boolean
   target?: PlaybookFingerprint | null
   [more: string]: unknown        // fields the screen doesn't show are passed back to the server untouched
 }
+
+export interface ScrapeField {
+  name: string
+  selector: string
+  type: 'text' | 'number' | 'link' | 'attr'
+  attr?: string | null
+}
+
+/** What a table-reading step read: every cell is text. */
+export interface ScrapedTable { columns: string[]; rows: string[][]; truncated: boolean; total: number }
 
 export interface PlaybookVariable {
   name: string
@@ -174,6 +191,7 @@ export interface PlaybookVariable {
   default?: string | null
   required: boolean
   runtime?: boolean
+  loop?: boolean
   allowed_hosts: string[]
   [more: string]: unknown
 }
@@ -217,6 +235,32 @@ export type InputMessage =
   | { type: 'input'; kind: 'mouse'; event: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel'; x: number; y: number; button?: string; clickCount?: number; deltaX?: number; deltaY?: number; modifiers?: number }
   | { type: 'input'; kind: 'key'; event: 'keyDown' | 'keyUp' | 'char' | 'insertText'; key?: string; code?: string; text?: string; keyCode?: number; modifiers?: number }
 
+/** What a schedule watches for (server: monitor.py). */
+export interface WatchSettings {
+  enabled: boolean
+  key_columns: string[]
+  ignore_columns: string[]
+  ignore_patterns: string[]
+  min_change_percent: number
+  report_added: boolean
+  report_removed: boolean
+  report_changed: boolean
+}
+
+export interface WatchChange { table: string; key: string; columns: { column: string; before: string; after: string }[] }
+export interface WatchRow { table: string; key: string; cells: Record<string, string> }
+
+/** How one watched run compared with the last one. */
+export interface WatchResult {
+  status: 'baseline' | 'unchanged' | 'changed' | 'reset' | 'skipped'
+  summary?: string
+  reason?: string
+  added?: number
+  removed?: number
+  changed?: number
+  diff?: { cut: boolean; added_rows: WatchRow[]; removed_rows: WatchRow[]; changed_rows: WatchChange[] }
+}
+
 export interface PlaybookRunSummary {
   run_id: string
   status: 'done' | 'failed' | 'needs_you' | 'stopped' | 'waiting' | 'declined' | 'expired' | 'cancelled'
@@ -228,6 +272,7 @@ export interface PlaybookRunSummary {
   playbook_version: number
   steps: number
   ok_steps: number
+  watch?: string
 }
 
 export interface PlaybookStepResult {
@@ -244,11 +289,12 @@ export interface PlaybookStepResult {
   tokens?: number | null         // what that used (prompt + answer), when the model reported it
 }
 
-export interface PlaybookRunRecord extends Omit<PlaybookRunSummary, 'steps' | 'ok_steps'> {
+export interface PlaybookRunRecord extends Omit<PlaybookRunSummary, 'steps' | 'ok_steps' | 'watch'> {
   screenshot?: boolean
   inputs: Record<string, string>
   steps: PlaybookStepResult[]
-  outputs: { step_id: string; query: string; text: string }[]
+  outputs: { step_id: string; query: string; text: string; table?: ScrapedTable }[]
+  watch?: WatchResult
 }
 
 export interface DamagedPlaybook {
@@ -289,6 +335,9 @@ export interface ScheduleView {
   runs_total: number
   remaining: number
   resume_after: string | null
+  watch: WatchSettings
+  last_change: string
+  last_change_at: string | null
   pending: PendingQuestion[]
 }
 

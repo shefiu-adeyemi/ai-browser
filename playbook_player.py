@@ -31,11 +31,14 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
 import playbook as pbk
+import playbook_scrape
 from playbook import Playbook, Step
 from playbook_match import Candidate, Match, candidates_from_selector_map, closest, find
 
 MAX_RUN_SECONDS = 900
 MAX_OUTPUT = 20000
+ROW_PAUSE = 1.5                 # seconds between the rows of a loop, so a site is not hit page after page
+MAX_RUN_CELLS = 60000             # table cells a whole run keeps (a loop over many pages stays bounded)
 MAX_SCREENSHOT = 400_000          # bytes; a bigger picture is not kept
 _LOGIN_PATH = re.compile(r"^/(login|signin|sign-in|sign_in|uas/login|authwall|checkpoint)(/|$|\?)", re.IGNORECASE)
 _NOT_AVAILABLE = re.compile(r"^Element index \d+ not available", re.IGNORECASE)
@@ -57,6 +60,7 @@ class StepResult:
     tokens: Optional[int] = None      # what that cost in tokens (prompt + answer), when the model reported it
     fatal: bool = False               # the run must stop even if later steps could go on
     meta: Optional[dict] = None       # for a waiting step: what is being asked (see PlaybookPlayer._approve)
+    table: Optional[dict] = None      # what a scrape step read: {"columns", "rows", "truncated", "total"}
 
 
 @dataclass
@@ -76,8 +80,9 @@ class RunResult:
         return round(self.finished_at - self.started_at, 1)
 
     def to_dict(self) -> dict:
+        steps = [{k: v for k, v in asdict(s).items() if k != "table"} for s in self.steps]     # tables live in `outputs`
         return {"status": self.status, "error": self.error, "seconds": self.seconds,
-                "steps": [asdict(s) for s in self.steps], "outputs": self.outputs,
+                "steps": steps, "outputs": self.outputs,
                 "screenshot": self.screenshot is not None, "waiting": self.waiting}
 
 
@@ -162,6 +167,11 @@ class SessionDriver:
         except Exception:
             return None
 
+    async def scrape(self, row_selector: Optional[str], fields: list[dict], max_rows: Optional[int]) -> dict:
+        """The raw cells of the table the page shows now (see playbook_scrape). Reads only; never acts on the page."""
+        page = await self.session.get_current_page()
+        return await playbook_scrape.read_page(page, row_selector, fields, max_rows)
+
     async def tabs(self) -> list[str]:
         """The ids (browser-use names a tab by the last 4 characters of its id) of the open tabs, in order."""
         state = await self.session.get_browser_state_summary(include_screenshot=False)
@@ -231,7 +241,7 @@ def host_of(url: str) -> str:
 def describe(step: Step) -> str:
     return step.note or {"open": "Open a page", "click": "Click", "type": "Type", "select": "Choose an option",
                          "key": "Press keys", "scroll": "Scroll", "wait": "Wait", "back": "Go back",
-                         "extract": "Read the page", "ai": "AI step"}.get(step.kind, step.kind)
+                         "extract": "Read the page", "scrape": "Read a table", "foreach": "For each row", "ai": "AI step"}.get(step.kind, step.kind)
 
 
 def _result_error(result: Any) -> str:
@@ -321,56 +331,160 @@ class PlaybookPlayer:
         self._allowed = allowed
 
         total = len(pb.steps)
-        left_out = False                                              # a step was skipped because nobody answered
-        for n, step in enumerate(pb.steps, start=1):
-            if self._clock() - result.started_at - self.approver.waited > self.max_seconds:
-                return finish("failed", f"Stopped: the run took longer than {int(self.max_seconds)} seconds.")
-            await self._say(f"▶ Step {n}/{total}: {describe(step)}")
-            t0 = self._clock()
-            try:
-                if step.id in self._unanswered:
-                    left_out = True
-                    res = StepResult(step.id, step.kind, detail="Skipped: nobody answered the question in time.")
-                elif step.id in self._skip:
-                    res = StepResult(step.id, step.kind, detail="Already done before the question, so not repeated.")
-                else:
-                    res = await self._step(step)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:                                     # a bug must not become a silent skip
-                res = StepResult(step.id, step.kind, describe(step), "failed",
-                                 f"Unexpected error: {type(e).__name__}: {e}")
-            res.id, res.kind, res.note = step.id, step.kind, describe(step)
-            self._track_typed(step, res)
-            if step.kind != "approve":              # asking the user changes nothing on the page: focus is where it was
-                self._prev_high = res.status == "ok" and (res.matched or "").endswith("(high)")
-            res.seconds = round(self._clock() - t0, 2)
-            result.steps.append(res)
-
-            if res.status == "ok" and step.ask and step.id not in self._skip:
-                self._did.add(step.id)
-            if res.status == "ok":
-                if res.output is not None:
-                    result.outputs.append({"step_id": step.id, "query": step.query or "", "text": res.output})
-                left = await self._left_approved_sites()
-                if left:
-                    res.status, res.fatal = "failed", True
-                    res.detail = f"Stopped: the page went to {left}, which this playbook is not approved to visit."
-                else:
-                    await self._check_sign_in(res)
-            if left_out and res.status in ("failed", "needs_you") and "was skipped" not in res.detail:
-                res.detail += " (An earlier step was left out because nobody answered, which may be why.)"
-            if res.status == "waiting":
-                await self._say(f"⏸ Step {n} is waiting for you: {res.detail}")
-                result.screenshot = await self._picture()
-                result.waiting = {**(res.meta or {}), "step_id": step.id, "index": n - 1, "done": sorted(self._did)}
-                return finish("waiting", f"Step {n} ({describe(step)}): waiting for you.")
-            if res.status != "ok":
-                await self._say(f"✖ Step {n} stopped the run: {res.detail}")
-                result.screenshot = await self._picture()
-                return finish("needs_you" if res.status == "needs_you" else "failed",
-                              f"Step {n} ({describe(step)}): {res.detail}")
+        self._left_out = False                                        # a step was skipped because nobody answered
+        self._tables: dict[str, dict] = {}                            # what each scrape step read, for a foreach step
+        self._pending_loop: Optional[dict] = None
+        self._loop_ctx: Optional[tuple[str, str]] = None
+        self._cells_left = MAX_RUN_CELLS
+        i = 0
+        while i < total:
+            step = pb.steps[i]
+            ended = await self._exec(result, step, i + 1, total, finish)
+            if ended is not None:
+                return ended
+            if step.kind == "foreach":
+                ended = await self._run_loop(result, pb, i, total, finish)
+                if ended is not None:
+                    return ended
+                i += step.body or 0
+            i += 1
         return finish("done")
+
+    async def _exec(self, result: RunResult, step: Step, n: int, total: int, finish: Callable[..., RunResult],
+                    row: Optional[tuple[int, int]] = None) -> Optional[RunResult]:
+        """Run one step and judge it. Returns the finished result if the run must end here, else None."""
+        if self._clock() - result.started_at - self.approver.waited > self.max_seconds:
+            return finish("failed", f"Stopped: the run took longer than {int(self.max_seconds)} seconds.")
+        where = f" (row {row[0]} of {row[1]})" if row else ""
+        await self._say(f"▶ Step {n}/{total}{where}: {describe(step)}")
+        t0 = self._clock()
+        try:
+            if step.id in self._unanswered:
+                self._left_out = True
+                res = StepResult(step.id, step.kind, detail="Skipped: nobody answered the question in time.")
+            elif step.id in self._skip:
+                res = StepResult(step.id, step.kind, detail="Already done before the question, so not repeated.")
+            else:
+                res = await self._step(step)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                                     # a bug must not become a silent skip
+            res = StepResult(step.id, step.kind, describe(step), "failed",
+                             f"Unexpected error: {type(e).__name__}: {e}")
+        res.id, res.kind, res.note = step.id, step.kind, describe(step) + where
+        self._track_typed(step, res)
+        if step.kind != "approve":              # asking the user changes nothing on the page: focus is where it was
+            self._prev_high = res.status == "ok" and (res.matched or "").endswith("(high)")
+        res.seconds = round(self._clock() - t0, 2)
+        result.steps.append(res)
+
+        if res.status == "ok" and step.ask and step.id not in self._skip:
+            self._did.add(step.id)
+        if res.status == "ok":
+            if res.table is not None:
+                self._tables[step.id] = res.table
+                result.outputs.append({"step_id": step.id, "query": (step.note or "Table") + where, "text": res.output or "",
+                                       "table": self._within_budget(res.table)})
+            elif res.output is not None:
+                result.outputs.append({"step_id": step.id, "query": step.query or "", "text": res.output})
+            left = await self._left_approved_sites()
+            if left:
+                res.status, res.fatal = "failed", True
+                res.detail = f"Stopped: the page went to {left}, which this playbook is not approved to visit."
+            else:
+                await self._check_sign_in(res)
+        if self._left_out and res.status in ("failed", "needs_you") and "was skipped" not in res.detail:
+            res.detail += " (An earlier step was left out because nobody answered, which may be why.)"
+        if res.status == "waiting":
+            await self._say(f"⏸ Step {n} is waiting for you: {res.detail}")
+            result.screenshot = await self._picture()
+            result.waiting = {**(res.meta or {}), "step_id": step.id, "index": n - 1, "done": sorted(self._did)}
+            return finish("waiting", f"Step {n} ({describe(step)}): waiting for you.")
+        if res.status != "ok":
+            await self._say(f"✖ Step {n} stopped the run: {res.detail}")
+            result.screenshot = await self._picture()
+            return finish("needs_you" if res.status == "needs_you" else "failed",
+                          f"Step {n}{where} ({describe(step)}): {res.detail}")
+        return None
+
+    async def _run_loop(self, result: RunResult, pb: Playbook, at: int, total: int,
+                        finish: Callable[..., RunResult]) -> Optional[RunResult]:
+        """Run the steps after a foreach step once for each value it found. A row whose steps fail stops the run, or
+        (when the step says so) is skipped; a sign-in wall, a refused action or running out of time always stops it."""
+        loop, self._pending_loop = self._pending_loop, None
+        step = pb.steps[at]
+        body = pb.steps[at + 1: at + 1 + (step.body or 0)]
+        values = loop["values"] if loop else []
+        skipped_rows = 0
+        for r, value in enumerate(values, start=1):
+            self._values[step.variable] = value
+            self._loop_ctx = (step.column or step.variable, value)
+            if r > 1:
+                await self._sleep(ROW_PAUSE)
+            await self._say(f"↻ Row {r} of {len(values)}: {value[:80]}")
+            for k, inner in enumerate(body, start=at + 2):
+                before = len(result.steps)
+                ended = await self._exec(result, inner, k, total, finish, row=(r, len(values)))
+                if ended is None:
+                    continue
+                last = result.steps[-1] if len(result.steps) > before else None
+                if (step.on_failure == "skip" and ended.status == "failed" and last is not None
+                        and not last.fatal and not await self._left_approved_sites()):       # a page off the approved sites ends the run
+                    result.status, result.error, result.finished_at, result.screenshot = "done", "", 0.0, None
+                    skipped_rows += 1
+                    break                                              # leave this row, carry on with the next
+                self._values.pop(step.variable, None)
+                self._loop_ctx = None
+                return ended
+        self._values.pop(step.variable, None)
+        self._loop_ctx = None
+        self._prev_high = False
+        if skipped_rows:
+            await self._say(f"Left out {skipped_rows} row{'' if skipped_rows == 1 else 's'} whose steps failed.")
+        return None
+
+    def _within_budget(self, table: dict) -> dict:
+        """A run keeps only so many cells in all, so a loop over many pages can't grow a record without limit."""
+        cols = max(1, len(table["columns"]))
+        keep = max(0, self._cells_left // cols)
+        if len(table["rows"]) <= keep:
+            self._cells_left -= len(table["rows"]) * cols
+            return table
+        self._cells_left = 0
+        return {**table, "rows": table["rows"][:keep], "truncated": True}
+
+    async def _foreach(self, step: Step) -> StepResult:
+        """Read the values of the loop and check every one BEFORE any is used: a value taken from a page is only
+        ever used if it is acceptable for the loop variable (for a web address, on a site the playbook may visit)."""
+        table = self._tables.get(step.source or "")
+        var = self._variables.get(step.variable or "")
+        if table is None or var is None:
+            return StepResult(step.id, step.kind, status="failed", detail="The step that reads the table did not run, so there is nothing to go through.")
+        names = [c.lower() for c in table["columns"]]
+        if (step.column or "").lower() not in names:
+            return StepResult(step.id, step.kind, status="failed", detail=f"The table has no column '{step.column}'.")
+        at = names.index((step.column or "").lower())
+        found = list(dict.fromkeys(str(r[at]).strip() for r in table["rows"] if at < len(r) and str(r[at]).strip()))
+        if not found:
+            return StepResult(step.id, step.kind, status="failed", detail=f"Column '{step.column}' has no values.")
+        cap = step.max_rows or pbk.DEFAULT_LOOP_ROWS
+        good: list[str] = []
+        why = ""
+        left = 0
+        for v in found:
+            problems = pbk.value_problems(var, v)
+            if problems:
+                left += 1
+                why = why or f"{v[:60]} {problems[0]}"
+            elif len(good) < cap:
+                good.append(v)
+        if not good:
+            return StepResult(step.id, step.kind, status="failed", detail=f"None of the {len(found)} values can be used ({why}).")
+        extra = len(found) - left - len(good)
+        notes = [f"{left} left out ({why})" if left else "", f"{extra} more than the limit of {cap} left out" if extra > 0 else ""]
+        self._pending_loop = {"values": good}
+        detail = f"{len(good)} row{'' if len(good) == 1 else 's'} to go through" + ("; " + "; ".join(n for n in notes if n) if any(notes) else "")
+        return StepResult(step.id, step.kind, detail=detail)
 
     # ---------------------------------------------------------------------------- steps
     async def _step(self, step: Step) -> StepResult:
@@ -403,6 +517,10 @@ class PlaybookPlayer:
             return await self._act_step(step, "scroll", {"down": step.down, "pages": step.pages})
         if kind in ("click", "type", "select", "scroll"):
             return await self._on_element(step)
+        if kind == "scrape":
+            return await self._scrape(step)
+        if kind == "foreach":
+            return await self._foreach(step)
         if kind == "extract":
             if not self.driver.has_llm:
                 return StepResult(step.id, kind, status="failed",
@@ -439,6 +557,37 @@ class PlaybookPlayer:
             return StepResult(step.id, step.kind, status="failed",
                               detail=f"Expected {', '.join(expected)} but the page is {host_of(final) or final or 'blank'}.")
         return res
+
+    async def _scrape(self, step: Step) -> StepResult:
+        """Read a table off the page: no AI, no clicking. A page that is still loading is given a few seconds;
+        a selector that finds nothing at all is a failure (the page changed), never an empty success."""
+        read = getattr(self.driver, "scrape", None)
+        if read is None:
+            return StepResult(step.id, step.kind, status="failed", detail="This browser can't read a table off a page.")
+        fields = [f.model_dump() for f in (step.fields or [])]
+        row_mode = bool(step.row_selector)
+        deadline = self._clock() + self.find_timeout
+        while True:
+            try:
+                raw = await asyncio.wait_for(read(step.row_selector, fields, step.max_rows), timeout=60)
+            except asyncio.CancelledError:
+                raise
+            except playbook_scrape.ScrapeError as e:
+                return StepResult(step.id, step.kind, status="failed", detail=str(e))
+            except asyncio.TimeoutError:
+                return StepResult(step.id, step.kind, status="failed", detail="Reading the page took too long.")
+            table, problem = playbook_scrape.build_table(fields, raw, row_mode)
+            if table is not None:
+                break
+            if self._clock() >= deadline:
+                return StepResult(step.id, step.kind, status="failed", detail=problem)
+            await self._sleep(self.poll)
+        ctx = self._loop_ctx
+        if ctx and ctx[0].lower() not in [c.lower() for c in table["columns"]]:      # say which row of the loop each line came from
+            table = {**table, "columns": [ctx[0], *table["columns"]], "rows": [[ctx[1], *r] for r in table["rows"]]}
+        n = len(table["rows"])
+        more = f" (the page has {table['total']}; the rest were left out)" if table["truncated"] else ""
+        return StepResult(step.id, step.kind, output=f"{n} row{'' if n == 1 else 's'} read{more}", table=table)
 
     async def _tab(self, step: Step) -> StepResult:
         ids = await self.driver.tabs()
@@ -679,6 +828,15 @@ class PlaybookPlayer:
 
 
 # ------------------------------------------------------------------------------- summary
+def _table_text(table: dict, show: int = 5) -> str:
+    """The first rows of a table as plain lines, for the chat."""
+    lines = [" | ".join(table["columns"])]
+    lines += [" | ".join(r) for r in table["rows"][:show]]
+    if len(table["rows"]) > show:
+        lines.append(f"... and {len(table['rows']) - show} more (see the run history).")
+    return "\n".join(lines)
+
+
 def summarize(pb: Playbook, run: RunResult) -> str:
     """What the user reads in the chat when a run ends."""
     done = sum(1 for s in run.steps if s.status == "ok")
@@ -693,5 +851,9 @@ def summarize(pb: Playbook, run: RunResult) -> str:
         head = f'"{pb.name}" stopped after {done} of {total} steps. {run.error}'
     parts = [head]
     for out in run.outputs:
-        parts.append(f"\n{out['query'] or 'Result'}:\n{out['text']}")
+        table = out.get("table")
+        if table:
+            parts.append(f"\n{out['query'] or 'Table'}: {out['text']}\n{_table_text(table)}")
+        else:
+            parts.append(f"\n{out['query'] or 'Result'}:\n{out['text']}")
     return "\n".join(parts)

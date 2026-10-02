@@ -35,7 +35,7 @@ export default function RunForm({ id, busy, onCancel, onStarted }: Props) {
         if (!res.ok || !data.ok) { setLoadError(reasonOf(res, data)); return }
         const p: Playbook = data.playbook
         setPb(p); setApproved(!!data.approved)
-        setValues(Object.fromEntries(p.variables.filter((v) => !v.runtime).map((v) => [v.name, v.default ?? ''])))
+        setValues(Object.fromEntries(p.variables.filter((v) => !v.runtime && !v.loop).map((v) => [v.name, v.default ?? ''])))
       } catch (e) {
         if (alive) setLoadError(`Couldn't open it (${errText(e)}).`)
       }
@@ -90,8 +90,8 @@ export default function RunForm({ id, busy, onCancel, onStarted }: Props) {
           </p>
         </div>
 
-        {pb.variables.every((v) => v.runtime) && <p className="text-xs text-gray-500">This playbook has no inputs. It runs exactly as recorded.</p>}
-        {pb.variables.filter((v) => !v.runtime).map((v) => (
+        {pb.variables.every((v) => v.runtime || v.loop) && <p className="text-xs text-gray-500">This playbook has no inputs. It runs exactly as recorded.</p>}
+        {pb.variables.filter((v) => !v.runtime && !v.loop).map((v) => (
           <label key={v.name} className="block">
             <span className="text-xs font-medium text-gray-700">
               {v.label || v.name}{v.required ? '' : ' (optional)'}

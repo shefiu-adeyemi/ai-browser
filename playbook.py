@@ -34,7 +34,7 @@ MAX_ATTR_VALUE = 300
 # Step kinds this version can store. A kind in the roadmap that is not here yet (repeat, if,
 # checkpoint, run_playbook) is rejected rather than stored half-understood.
 KINDS = ("open", "search", "back", "click", "type", "select", "key", "scroll", "wait", "tab", "handoff",
-         "approve", "input", "extract", "ai")
+         "approve", "input", "scrape", "foreach", "extract", "ai")
 AI_KINDS = ("extract", "ai")           # these need a model; every other kind replays without one
 VAR_TYPES = ("text", "number", "url", "linkedin_url")
 _FIELDS_USED = {                        # which optional fields each kind may carry
@@ -42,10 +42,13 @@ _FIELDS_USED = {                        # which optional fields each kind may ca
     "type": {"target", "text"}, "select": {"target", "text"}, "key": {"keys"}, "scroll": {"target"},
     "wait": {"seconds"}, "tab": {"tab_index"}, "handoff": {"message"}, "approve": {"message", "timeout_minutes", "on_timeout"},
     "input": {"message", "variable", "timeout_minutes"},
+    "scrape": {"fields", "row_selector", "max_rows"},
+    "foreach": {"source", "column", "variable", "body", "max_rows", "on_failure"},
     "extract": {"query", "tier"}, "ai": {"query", "tier"},
 }
 _CHECKED_FIELDS = ("url", "target", "text", "keys", "seconds", "query", "engine", "message", "tab_index",
-                   "timeout_minutes", "variable", "on_timeout", "tier")
+                   "timeout_minutes", "variable", "on_timeout", "tier", "fields", "row_selector", "max_rows",
+                   "source", "column", "body", "on_failure")
 DEFAULT_APPROVAL_MINUTES = 24 * 60
 
 # Search engines a `search` step can use. The address is built here from the engine and the
@@ -113,13 +116,34 @@ class Variable(BaseModel):
     # A runtime variable is not given when the run starts: a person answers an `input` step DURING the run
     # (text or a number only; a web address typed mid-run could send a run anywhere).
     runtime: bool = False
+    # A loop variable takes each value of a column in turn, inside a `foreach` step. It is never given up front.
+    loop: bool = False
+
+
+MAX_LOOP_ROWS = 50
+DEFAULT_LOOP_ROWS = 20
+MAX_LOOP_BODY = 20
+LOOP_KINDS = ("open", "search", "back", "click", "type", "select", "key", "scroll", "wait", "tab", "scrape")
+MAX_SCRAPE_FIELDS = 30
+MAX_SCRAPE_ROWS = 500
+DEFAULT_SCRAPE_ROWS = 100
+SCRAPE_TYPES = ("text", "number", "link", "attr")
+
+
+class ScrapeField(BaseModel):
+    """One column of a scraped table: where to read it (a CSS selector, relative to the row) and how to read it."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(max_length=40)
+    selector: str = Field(max_length=300)           # ":scope" means the row element itself
+    type: Literal["text", "number", "link", "attr"] = "text"
+    attr: Optional[str] = Field(default=None, max_length=60)      # type "attr": which attribute to read
 
 
 class Step(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     kind: Literal["open", "search", "back", "click", "type", "select", "key", "scroll", "wait", "tab",
-                  "handoff", "approve", "input", "extract", "ai"]
+                  "handoff", "approve", "input", "scrape", "foreach", "extract", "ai"]
     tag: Literal["deterministic", "ai"] = "deterministic"
     note: str = Field(default="", max_length=300)           # plain words: what this step does
     url: Optional[str] = None
@@ -146,6 +170,17 @@ class Step(BaseModel):
     # extract / ai step: which model TIER reads the page (a tier, never a model name, so the models behind the
     # tiers can be swapped in Settings at any time). None = automatic, the router's own choice for the job.
     tier: Optional[Literal["fast", "standard", "strong"]] = None
+    # scrape step: read a table from the page with no AI. `row_selector` picks each repeated item (a row, a card,
+    # a result); every field is then read inside it. Without a row selector the page gives ONE row.
+    fields: Optional[list[ScrapeField]] = Field(default=None, max_length=MAX_SCRAPE_FIELDS)
+    row_selector: Optional[str] = Field(default=None, max_length=300)
+    max_rows: Optional[int] = Field(default=None, ge=1, le=MAX_SCRAPE_ROWS)
+    # foreach step: run the next `body` steps once for each value of `column` of an earlier scrape step (`source` is
+    # that step's id). The value goes into the loop variable named in `variable`. `max_rows` caps the loop (MAX_LOOP_ROWS).
+    source: Optional[str] = Field(default=None, max_length=20)
+    column: Optional[str] = Field(default=None, max_length=40)
+    body: Optional[int] = Field(default=None, ge=1, le=MAX_LOOP_BODY)
+    on_failure: Optional[Literal["stop", "skip"]] = None       # a row whose steps fail: stop the run (default) or skip that row
     ask: bool = False        # reaches other people or can't be undone: needs the user's approval
     check: Optional[Check] = None
 
@@ -251,6 +286,36 @@ def _check_placeholders(label: str, value: Optional[str], variables: dict[str, V
     return out
 
 
+_FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 _-]{0,39}$")
+_ATTR_RE = re.compile(r"^[A-Za-z_:][-A-Za-z0-9_:.]{0,59}$")
+
+
+def scrape_problems(s: Step) -> list[str]:
+    """Why a table-reading step can't be stored (selectors themselves are checked by the page when it runs)."""
+    out: list[str] = []
+    fields = s.fields or []
+    if not fields:
+        return ["a scrape step needs at least one field"]
+    if s.row_selector is not None and (not s.row_selector.strip() or _CONTROL_RE.search(s.row_selector)):
+        out.append("the row selector is empty or has control characters")
+    names: set[str] = set()
+    for f in fields:
+        if not _FIELD_NAME_RE.fullmatch(f.name):
+            out.append(f"field name '{f.name}' must start with a letter and use letters, digits, spaces, - or _")
+        elif f.name.lower() in names:
+            out.append(f"field '{f.name}' is named twice")
+        names.add(f.name.lower())
+        if not f.selector.strip() or _CONTROL_RE.search(f.selector):
+            out.append(f"field '{f.name}' needs a selector (no control characters)")
+        if f.type == "attr" and not (f.attr and _ATTR_RE.fullmatch(f.attr)):
+            out.append(f"field '{f.name}' needs the name of the attribute to read")
+        if f.type != "attr" and f.attr is not None:
+            out.append(f"field '{f.name}': only an attribute field has an attribute name")
+        if f.selector.strip() == ":scope" and s.row_selector is None:
+            out.append(f"field '{f.name}': ':scope' means the row, and this step has no row selector")
+    return out
+
+
 def validate(pb: Playbook) -> list[str]:
     """Every reason this playbook cannot be stored or run; empty means fine."""
     problems: list[str] = []
@@ -302,7 +367,7 @@ def validate(pb: Playbook) -> list[str]:
                 "type": ("target", s.target), "select": ("target", s.target), "key": ("keys", s.keys),
                 "wait": ("seconds", s.seconds), "tab": ("tab_index", s.tab_index),
                 "handoff": ("message", s.message), "approve": ("message", s.message),
-                "input": ("variable", s.variable),
+                "input": ("variable", s.variable), "foreach": ("source", s.source),
                 "extract": ("query", s.query), "ai": ("query", s.query)}
         if s.kind in need and need[s.kind][1] is None:
             problems.append(f"{where}: a {s.kind} step needs '{need[s.kind][0]}'")
@@ -316,6 +381,10 @@ def validate(pb: Playbook) -> list[str]:
             problems.append(f"{where}: a {s.kind} step must come BEFORE the step it is about, so it can't be last")
         if s.kind in ("type", "select") and s.text is None:
             problems.append(f"{where}: a {s.kind} step needs 'text'")
+        if s.kind == "scrape":
+            problems += [f"{where}: {p}" for p in scrape_problems(s)]
+        if s.kind == "foreach" and not (s.column and s.variable and s.body):
+            problems.append(f"{where}: a foreach step needs a column, a variable and the number of steps to repeat")
 
         if s.kind == "open" and s.url is not None:
             p = _url_problem(s.url, variables)
@@ -337,6 +406,7 @@ def validate(pb: Playbook) -> list[str]:
                                         {k: v for k, v in variables.items() if not v.runtime} if s.kind in ("approve", "input") else {},
                                         allow_secret=False)
     problems += _runtime_problems(pb, variables)
+    problems += _loop_problems(pb, variables)
     for n, s in enumerate(pb.steps):
         if s.kind == "approve" and s.on_timeout == "skip" and not (n + 1 < len(pb.steps) and pb.steps[n + 1].ask):
             problems.append(f"step {s.id}: 'skip and carry on' only works when the very next step is one that needs approval "
@@ -346,6 +416,65 @@ def validate(pb: Playbook) -> list[str]:
 
 def runtime_variables(pb: Playbook) -> list[Variable]:
     return [v for v in pb.variables if v.runtime]
+
+
+def loop_body(pb: Playbook, index: int) -> list[Step]:
+    """The steps a foreach step at this position (0-based) repeats."""
+    s = pb.steps[index]
+    return pb.steps[index + 1: index + 1 + (s.body or 0)] if s.kind == "foreach" else []
+
+
+def _loop_problems(pb: Playbook, variables: dict[str, Variable]) -> list[str]:
+    """Rules for `foreach`: a loop reads values from a table an earlier step scraped, runs only plain read-and-move steps
+    for each, never touches LinkedIn (which needs paced, capped visits) and may not carry a value it did not check."""
+    out: list[str] = []
+    loops = [(n, s) for n, s in enumerate(pb.steps) if s.kind == "foreach"]
+    used_by: dict[str, int] = {}
+    inside: set[int] = set()
+    for n, s in loops:
+        where = f"step {s.id}"
+        scrape = next((x for x in pb.steps[:n] if x.id == s.source and x.kind == "scrape"), None)
+        if scrape is None:
+            out.append(f"{where}: 'source' must be an earlier step that reads a table")
+        elif s.column and s.column.lower() not in {f.name.lower() for f in scrape.fields or []}:
+            out.append(f"{where}: the table has no column '{s.column}'")
+        v = variables.get(s.variable or "")
+        if v is None:
+            out.append(f"{where}: the loop variable '{s.variable}' is not defined")
+        else:
+            if not v.loop:
+                out.append(f"{where}: variable '{v.name}' must be marked as a loop variable")
+            if v.type not in ("text", "number", "url"):
+                out.append(f"{where}: a loop variable can be text, a number or a web address, not {v.type}")
+            if v.name in used_by:
+                out.append(f"{where}: loop variable '{v.name}' is already used by another loop")
+            used_by[v.name] = n
+        if s.max_rows is not None and s.max_rows > MAX_LOOP_ROWS:
+            out.append(f"{where}: a loop runs at most {MAX_LOOP_ROWS} rows")
+        body = pb.steps[n + 1: n + 1 + (s.body or 0)]
+        if s.body and len(body) < s.body:
+            out.append(f"{where}: there are not {s.body} steps after it to repeat")
+        for k, b in enumerate(body, start=n + 1):
+            inside.add(k)
+            if b.kind not in LOOP_KINDS:
+                out.append(f"step {b.id}: a {b.kind} step can't be inside a loop (only {', '.join(LOOP_KINDS)})")
+            if b.ask:
+                out.append(f"step {b.id}: a step that sends or can't be undone can't be inside a loop; use a schedule with one row each")
+    if loops and any(host_allowed(h, ["linkedin.com"]) for h in compute_domains(pb)):
+        out.append("a loop can't be used on LinkedIn, because LinkedIn visits are paced and capped per day: "
+                   "use a schedule with one row per profile instead")
+    for v in variables.values():
+        if v.loop and v.name not in used_by:
+            out.append(f"variable '{v.name}' is a loop variable, but no foreach step uses it")
+        if v.loop and v.runtime:
+            out.append(f"variable '{v.name}' can't be both a loop variable and answered during the run")
+    for k, s in enumerate(pb.steps):
+        for field in ("url", "text", "keys", "query", "message"):
+            for name in PLACEHOLDER_RE.findall(getattr(s, field, None) or ""):
+                at = used_by.get(name)
+                if at is not None and not (at < k < at + 1 + (pb.steps[at].body or 0)):
+                    out.append(f"step {s.id}: uses '{name}', which only exists inside its loop")
+    return out
 
 
 def _runtime_problems(pb: Playbook, variables: dict[str, Variable]) -> list[str]:
@@ -410,7 +539,8 @@ def approval_hash(pb: Playbook) -> str:
     step: it changes what a run costs, not what it does or may reach (the guard is the same on every tier)."""
     body = {
         "steps": [s.model_dump(mode="json", exclude={"note", "tier"}) for s in pb.steps],
-        "variables": [{"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts), "runtime": v.runtime}
+        "variables": [{"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts), "runtime": v.runtime,
+                       "loop": v.loop}
                       for v in pb.variables],
         "domains": compute_domains(pb),
     }
@@ -481,8 +611,10 @@ def bind_values(pb: Playbook, supplied: dict) -> tuple[dict[str, str], list[str]
         errors.append(f"'{extra}' is not a variable of this playbook")
     for name in sorted(set(supplied) & {v.name for v in pb.variables if v.runtime}):
         errors.append(f"'{name}' is answered while the run is going, not before it")
+    for name in sorted(set(supplied) & {v.name for v in pb.variables if v.loop}):
+        errors.append(f"'{name}' is filled from a table while the run is going, not before it")
     for v in pb.variables:
-        if v.runtime:
+        if v.runtime or v.loop:
             continue
         raw = supplied.get(v.name)
         if raw is None or (isinstance(raw, str) and raw == ""):

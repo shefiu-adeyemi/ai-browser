@@ -31,6 +31,12 @@ import env_store
 import providers
 from action_guard import GuardedTools, SAFETY_PROMPT
 from approvals import ApprovalBroker
+import playbook_picker
+import playbook_suggest
+import playbook_scrape
+import watcher
+from snapshots import SnapshotStore
+from batch_check import check_rows
 from remembered_answers import RememberedAnswers
 from browser_cleanup import kill_stale_browsers, trim_tabs
 from chat_store import ChatStore
@@ -39,7 +45,7 @@ import playbook as pbk
 from playbook_recorder import draft_from_history
 from playbook_player import PlaybookPlayer, SessionDriver, StepApprover, summarize, _LOGIN_PATH
 import playbook_templates
-from results_export import runs_to_csv
+from results_export import combined_table, runs_to_csv, runs_to_json
 from playbook_runs import KEEP_PER_PLAYBOOK as RunStore_KEEP, RunStore
 from playbook_store import PlaybookConflict, PlaybookInvalid, PlaybookNotFound, PlaybookStore
 import schedules as sch
@@ -1242,6 +1248,7 @@ async def delete_session(sid: str):
 # ---------------------------------------------------------------------------
 _playbooks = PlaybookStore(app_paths.PLAYBOOKS_DIR)
 _remembered = RememberedAnswers(app_paths.REMEMBERED_ANSWERS_FILE)
+_snapshots = SnapshotStore(app_paths.SNAPSHOTS_DIR)
 _runs = RunStore(app_paths.PLAYBOOK_RUNS_DIR)
 
 
@@ -1363,6 +1370,17 @@ def _count_usage(pb: pbk.Playbook, values: dict) -> None:
         _log.exception("could not count a run toward the daily limits")
 
 
+def _watch_run(pb: pbk.Playbook, values: dict, run_id: str, schedule: Schedule, result) -> Optional[dict]:
+    """Compare a finished scheduled run with the last one, if the schedule watches for changes. Never fails the run."""
+    if not schedule.watch.enabled:
+        return None
+    try:
+        return watcher.observe(_snapshots, pb.id, values, run_id, result.outputs, result.to_dict()["steps"], schedule.watch, scope=schedule.id)
+    except Exception:
+        _log.exception("could not compare a run with the last one")
+        return {"status": "skipped", "reason": "The comparison could not be made (see the log)."}
+
+
 async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, schedule: Schedule, row: int,
                                   approved: frozenset = frozenset(), done: frozenset = frozenset(),
                                   answers: Optional[dict] = None, skipped: frozenset = frozenset()) -> SchedOutcome:
@@ -1381,9 +1399,13 @@ async def run_playbook_unattended(pb: pbk.Playbook, values: dict, run_id: str, s
                                   answers={**_remembered_answers(pb), **dict(answers or {})}, skipped=set(skipped))
         if result.waiting:
             record["waiting"] = result.waiting
+        seen = _watch_run(pb, values, run_id, schedule, result) if result.status == "done" else None
+        if seen is not None:
+            record["watch"] = seen
         _save_run_record(pb, record, result.status, result.error, result)
         await _broadcast({"type": "status", "text": "done" if result.status in ("done", "waiting") else "error"})
-        return SchedOutcome(result.status, run_id, result.error, waiting=result.waiting)
+        return SchedOutcome(result.status, run_id, result.error, waiting=result.waiting,
+                            watch={"status": seen["status"], "summary": seen.get("summary") or seen.get("reason", "")} if seen else None)
     except asyncio.CancelledError:
         _save_run_record(pb, record, "stopped", "Stopped by you.")
         await _broadcast({"type": "status", "text": "idle"})
@@ -1428,6 +1450,85 @@ async def draft_playbook():
         _log.exception("could not build a playbook draft")
         return _pb_error(500, f"Could not read the run: {type(e).__name__}: {e}")
     return {"ok": True, **draft.to_dict()}
+
+
+async def _picker_page():
+    """The page the browser is showing, for the click-to-pick tool. Not while a task is using the browser."""
+    if _ctl.running or _ctl.paused:
+        raise playbook_picker.PickError("A task is running. Try again when it has finished.")
+    _touch_user()
+    session = await _ensure_session()
+    return session, await session.get_current_page()
+
+
+@app.post("/playbooks/scrape-pick")
+async def scrape_pick_start(body: dict):
+    """Start picking: the page in view outlines what is under the mouse and the next click is reported by
+    GET /playbooks/scrape-pick. Only on the user's request, and the page is put back when it ends."""
+    mode = body.get("mode")
+    row = body.get("row_selector")
+    if mode not in ("row", "field") or (row is not None and not isinstance(row, str)):
+        return _pb_error(400, "Pick either a row or a column.")
+    try:
+        session, page = await _picker_page()
+        await playbook_picker.start(page, mode, row)
+        url = await session.get_current_page_url()
+    except playbook_picker.PickError as e:
+        return _pb_error(409 if "task is running" in str(e) else 422, str(e))
+    except Exception as e:
+        _log.warning("picker start failed: %s", e)
+        return _pb_error(502, f"The browser couldn't be reached ({str(e)[:150]}).")
+    return {"ok": True, "url": url}
+
+
+@app.get("/playbooks/scrape-pick")
+async def scrape_pick_poll():
+    try:
+        _session, page = await _picker_page()
+        return {"ok": True, **await playbook_picker.poll(page)}
+    except playbook_picker.PickError as e:
+        return _pb_error(409, str(e))
+    except Exception as e:
+        return _pb_error(502, f"The browser couldn't be reached ({str(e)[:150]}).")
+
+
+@app.delete("/playbooks/scrape-pick")
+async def scrape_pick_stop():
+    try:
+        session = await _ensure_session()
+        await playbook_picker.stop(await session.get_current_page())
+    except Exception:
+        pass                                                    # nothing to put back if the browser is not there
+    return {"ok": True}
+
+
+@app.post("/playbooks/scrape-suggest")
+async def scrape_suggest(body: dict):
+    """Ask a model to propose the row and column selectors for what the user describes, on the page in view.
+    The proposal is tried on the page before it is shown, and nothing is changed until the user applies it."""
+    description = body.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return _pb_error(400, "Say what you want to read, for example: the product names and prices.")
+    if _ctl.running or _ctl.paused:
+        return _pb_error(409, "A task is running. Try again when it has finished.")
+    try:
+        usable = model_tiers.read_slots()["standard"].usable
+    except Exception:
+        usable = False
+    if not usable:
+        return _pb_error(409, "No AI model is set up yet (see Settings), so there is nothing to suggest with.")
+    _touch_user()
+    try:
+        session = await _ensure_session()
+        page = await session.get_current_page()
+        url = await session.get_current_page_url()
+        out = await playbook_suggest.suggest(page, _router.escalating("selectors"), description, url)
+    except playbook_suggest.SuggestError as e:
+        return _pb_error(422, str(e))
+    except Exception as e:
+        _log.warning("selector suggestion failed: %s", e)
+        return _pb_error(502, f"The browser or the model couldn't be reached ({str(e)[:150]}).")
+    return {"ok": True, "url": url, **out}
 
 
 @app.get("/playbooks/templates")
@@ -1532,6 +1633,44 @@ async def playbook_results_csv(pid: str):
                     headers={"Content-Disposition": 'attachment; filename="results.csv"', "Cache-Control": "no-store"})
 
 
+@app.get("/playbooks/{pid}/results.json")
+async def playbook_results_json(pid: str):
+    """The same results for another program: one object per run with its inputs and tables."""
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    records = [r for row in _runs.recent(pid, limit=RunStore_KEEP) if (r := _runs.get(pid, row["run_id"])) is not None]
+    return Response(content=runs_to_json(records).encode("utf-8"), media_type="application/json; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="results.json"', "Cache-Control": "no-store"})
+
+
+@app.get("/playbooks/{pid}/results/table")
+async def playbook_results_table(pid: str):
+    """Every row this playbook has scraped, stacked, so another playbook can use one column as its inputs."""
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    records = [r for row in _runs.recent(pid, limit=RunStore_KEEP) if (r := _runs.get(pid, row["run_id"])) is not None]
+    return {"ok": True, **combined_table(records)}
+
+
+@app.post("/playbooks/{pid}/check-rows")
+async def playbook_check_rows(pid: str, body: dict):
+    """A dry run of a batch: check the first rows and say what each would do, without opening a browser."""
+    if (bad := _pb_id_or_error(pid)) is not None:
+        return bad
+    try:
+        pb = _playbooks.get(pid)
+    except PlaybookNotFound:
+        return _pb_error(404, "That playbook no longer exists.")
+    except PlaybookInvalid as e:
+        return _pb_error(422, "This playbook can't be used.", problems=e.problems)
+    except OSError as e:
+        return _pb_error(500, f"Couldn't read it ({type(e).__name__}: {e}).")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or len(rows) > sch.MAX_ITEMS:
+        return _pb_error(400, f"Give a list of at most {sch.MAX_ITEMS} rows.")
+    return {"ok": True, **check_rows(pb, rows, _limits)}
+
+
 @app.get("/playbooks/{pid}/runs/{rid}/screenshot")
 async def playbook_run_screenshot(pid: str, rid: str):
     if (bad := _pb_id_or_error(pid)) is not None:
@@ -1580,6 +1719,7 @@ async def delete_playbook(pid: str):
         _runs.delete_playbook_runs(pid)
         removed = _schedules.delete_for_playbook(pid)
         _remembered.forget(pid)
+        _snapshots.delete_playbook(pid)
         return {"ok": True, "deleted": deleted, "schedules_deleted": removed}
     except OSError as e:
         _log.exception("could not delete a playbook")
@@ -1675,6 +1815,7 @@ async def _execute_scheduled(pb: pbk.Playbook, values: dict, schedule: Schedule,
 async def _scheduler_housekeeping(days: int) -> None:
     await asyncio.to_thread(_runs.prune_older_than, days)
     await asyncio.to_thread(_notifications.prune_older_than, days)
+    await asyncio.to_thread(_snapshots.prune_older_than, days)
 
 
 def _scheduler_idle() -> bool:
@@ -1724,13 +1865,14 @@ def _schedule_view(s: Schedule, names: dict[str, str]) -> dict:
         "last_status": st.last_status, "last_detail": st.last_detail, "paused_reason": st.paused_reason,
         "paused_detail": st.paused_detail, "missed": st.missed, "runs_total": st.runs_total,
         "remaining": len(st.queue), "resume_after": st.resume_after,
+        "watch": s.watch.model_dump(mode="json"), "last_change": st.last_change, "last_change_at": st.last_change_at,
         "pending": [{"run_id": p.run_id, "row": p.row, "message": p.message, "detail": p.detail, "url": p.url,
                      "parked_at": p.parked_at, "expires_at": p.expires_at, "kind": p.kind, "variable": p.variable,
                      "on_timeout": p.on_timeout} for p in st.parked],
     }
 
 
-_SCHEDULE_FIELDS = ("id", "name", "playbook_id", "enabled", "cadence", "items", "on_failure", "allow_sensitive")
+_SCHEDULE_FIELDS = ("id", "name", "playbook_id", "enabled", "cadence", "items", "on_failure", "allow_sensitive", "watch")
 
 
 @app.get("/schedules")
@@ -1881,6 +2023,38 @@ async def check_linkedin_session():
     return {"ok": True, "signed_in": signed_in, "url": url,
             "message": "LinkedIn is signed in." if signed_in else
                        "LinkedIn is not signed in. Sign in in the browser on the left, then check again."}
+
+
+@app.post("/playbooks/scrape-preview")
+async def scrape_preview(body: dict):
+    """Try a table-reading step on the page the browser is showing right now, so selectors can be checked
+    before the playbook is saved. Reads only; it never navigates, clicks or types, and only when nothing else
+    is using the browser."""
+    if _ctl.running or _ctl.paused:
+        return _pb_error(409, "A task is running. Try again when it has finished.")
+    try:
+        step = pbk.Step(id="s1", kind="scrape", row_selector=(body.get("row_selector") or None), max_rows=body.get("max_rows") or None,
+                        fields=body.get("fields"))
+    except ValueError as e:
+        return _pb_error(400, "Those settings can't be used.", problems=[str(e)[:300]])
+    if problems := pbk.scrape_problems(step):
+        return _pb_error(400, "Those settings can't be used.", problems=problems)
+    _touch_user()
+    fields = [f.model_dump() for f in step.fields or []]
+    try:
+        session = await _ensure_session()
+        page = await session.get_current_page()
+        url = await session.get_current_page_url()
+        raw = await playbook_scrape.read_page(page, step.row_selector, fields, min(step.max_rows or 10, 10))
+    except playbook_scrape.ScrapeError as e:
+        return _pb_error(422, str(e))
+    except Exception as e:
+        _log.warning("scrape preview failed: %s", e)
+        return _pb_error(502, f"The browser couldn't be read ({str(e)[:150]}).")
+    table, why = playbook_scrape.build_table(fields, raw, bool(step.row_selector))
+    if table is None:
+        return {"ok": True, "found": False, "message": why, "url": url, "total": raw.get("total", 0)}
+    return {"ok": True, "found": True, "url": url, "columns": table["columns"], "rows": table["rows"], "total": table["total"]}
 
 
 @app.post("/scheduler/quiet-hours")

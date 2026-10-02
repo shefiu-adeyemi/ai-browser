@@ -146,6 +146,11 @@ export default function Schedules({ onNew, onEdit, notify }: Props) {
                         Last: {formatWhen(new Date(s.last_run_at).getTime() / 1000)} · {s.last_status}{s.last_detail ? ` · ${s.last_detail}` : ''}
                       </p>
                     )}
+                    {s.watch?.enabled && (
+                      <p className="mt-0.5 truncate text-[11px] text-amber-700" title={s.last_change}>
+                        {s.last_change ? `Last change: ${s.last_change}` : 'Watching for changes: nothing has changed yet.'}
+                      </p>
+                    )}
                     {s.missed > 0 && <p className="text-[11px] text-gray-400">{s.missed} missed while the app was closed</p>}
                   </div>
                   <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${st.cls}`}>{st.label}</span>

@@ -56,6 +56,7 @@ PURPOSES: dict[str, tuple[str, str]] = {
     "repair":           ("fast",     "Finding a button again after a page changed"),
     "retry":            ("strong",   "A second attempt after the reviewer said it was incomplete"),
     "draft":            ("strong",   "Drafting a playbook from a description"),
+    "selectors":        ("standard", "Suggesting the selectors for a table you describe in words"),
 }
 
 # What "Use suggested" fills in: a cheap model for Fast, the best for Strong, per provider.
