@@ -434,3 +434,37 @@ costs the approval, like any change to what a run may do).
 
 Not built: repairing a step by looking at a screenshot, automatically updating the playbook after repeated identical repairs (it
 only ever offers), and repairing a step in a loop body differently per row.
+
+## Phase 8 status: natural language to playbook (built and tested)
+In the Playbooks window, "Describe a task and get a playbook": type what you want ("open https://news.ycombinator.com and read the
+title and link of every story"), and your AI model plans it, the plan is TRIED in the browser on the left, and you get an unsaved,
+unapproved draft to review, with a report of how each step did. Replays cost nothing, as for any playbook.
+- **Stage 1, the plan.** The Strong model (the router's "draft" job) answers with a short plan made only of known step kinds (open,
+  search, click, type, select, scroll, wait, back, read a table, ask-you, hand-off), a name, and variables with examples. It cannot
+  write an element index or a fingerprint: it says "the button called Next". The plan is cut down hard: unknown kinds and fields are
+  refused by the schema, a stored secret in any step is refused, a step using a variable that doesn't exist is dropped, and every drop
+  is explained.
+- **Stage 2, the walk.** The plan is tried on the live browser through the SAME player logic a replay uses, one step at a time:
+  - a page is opened only if you wrote that site in your description (or the address is a variable, or the page was already open);
+    a site the model chose by itself is NOT visited unless you tick "Let it open sites I did not mention";
+  - an element named in words is found on the page by its text (exact, then a whole-word match, with the kind respected: a button is
+    a button, link or submit input, a field is not), and only when ONE element is clearly best; otherwise the model chooses among a
+    short list of close ones; otherwise it is reported with the nearest names and nothing after it is tried;
+  - a table is read with selectors the model proposes and that are tried on the page, and the first rows it would read are SHOWN;
+  - a step that sends or posts (by its words, or because the safety guard would ask) is found and marked "needs approval" but
+    never run, and nothing after it is tried; a hand-off stops the walk too; questions are added but not asked.
+- **What you get.** A draft in the usual editor (unapproved, nothing stored until Save), plus "how the draft did": per step
+  "worked on the page / added, not run / couldn't do this / failed / not tried", sample rows, and what drafting cost (tokens from the
+  planning call and every model call the walk made). Problems that would stop it being saved are listed.
+- **Optional.** "Let it look at the page in the browser first" sends a short outline of the page in view (same outline as "Suggest
+  with AI": no scripts, typed values or link query strings) with the description. It never touches your other tabs.
+- **Safety summary.** The description and page outline are marked as data the model must not obey; its answer is a schema; every
+  step is checked on the real page; nothing risky runs; the draft is unapproved; and you read it before it can run by itself.
+- **Tests.** `test_playbook_draft.py` (cleaning, host rule, finding elements, 20 walk cases), `test_draft_app.py` (the job through
+  the app: start, poll, stop, busy, no model, failure), frontend `Describe.test.tsx`, and eight real-Chromium tests
+  (`test_draft_browser.py`: a page and a table become a playbook that replays to the same rows, a link is followed to the next page,
+  a Buy button is never pressed, a button really is pressed, typing uses the example and the saved draft takes a new value, an
+  unnamed site is never visited, and other tabs are untouched).
+
+Not built: drafting several playbooks at once, a plan that loops over a table (use the loop button in the editor afterwards), and
+asking the user a clarifying question before planning.

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import ScrapeEditor from './ScrapeEditor'
+import DraftReport from './DraftReport'
 import ForEachEditor from './ForEachEditor'
 import { Trash2, ShieldCheck, Sparkles, MousePointerClick, RotateCcw } from 'lucide-react'
-import type { ModelTier, Playbook, PlaybookStep, TiersInfo, VariableSuggestion } from '@/types'
+import type { DescribedDraft, ModelTier, Playbook, PlaybookStep, TiersInfo, VariableSuggestion } from '@/types'
 import { KIND_LABEL, TIER_LABEL, addLoop, askForText, askedVariable, autoTier, errText, fetchTiers, isGuarded, readJson, stepDetail, tierModelText, stepTarget, stopAskingForText, usedVariables, reasonOf } from './shared'
 
 interface Props {
@@ -12,6 +13,8 @@ interface Props {
   onCancel: () => void
   /** `schedulesAffected`: how many switched-on schedules lost their approval because of this save. */
   onSaved: (name: string, schedulesAffected: number) => void
+  /** A playbook drafted from a description (mode 'draft'): shown for review instead of loading the last run. */
+  initial?: DescribedDraft
 }
 
 /**
@@ -21,7 +24,7 @@ interface Props {
 /** The job a model step does, as the router names it (so the screen can say which tier "automatic" means). */
 const purposeOf = (s: PlaybookStep) => (s.kind === 'extract' ? 'playbook_extract' : 'agent')
 
-export default function Editor({ mode, id, onCancel, onSaved }: Props) {
+export default function Editor({ mode, id, onCancel, onSaved, initial }: Props) {
   const [pb, setPb] = useState<Playbook | null>(null)
   const [suggestions, setSuggestions] = useState<VariableSuggestion[]>([])
   const [notes, setNotes] = useState<string[]>([])
@@ -37,6 +40,17 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
   const askedText = useRef<Record<string, string>>({})        // what a step typed before it was turned into a question
 
   const load = async () => {
+    if (initial) {                                    // drafted from a description: nothing to fetch, nothing stored yet
+      setPb(initial.playbook)
+      setNotes(initial.notes)
+      setSuggestions([])
+      setVersions([])
+      setWasApproved(false)
+      setApprove(false)
+      setChanged(true)
+      setProblems([])
+      return
+    }
     try {
       const res = mode === 'draft'
         ? await fetch('/playbooks/draft', { method: 'POST' })
@@ -236,6 +250,8 @@ export default function Editor({ mode, id, onCancel, onSaved }: Props) {
             {notes.map((n, i) => <li key={i}>• {n}</li>)}
           </ul>
         )}
+
+        {initial && <DraftReport draft={initial} />}
 
         <ol className="space-y-1.5">
           {pb.steps.map((s, i) => (

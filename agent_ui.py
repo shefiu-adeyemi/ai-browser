@@ -31,6 +31,7 @@ import env_store
 import providers
 from action_guard import GuardedTools, SAFETY_PROMPT
 from approvals import ApprovalBroker
+import playbook_draft
 import playbook_picker
 import playbook_repair
 import playbook_suggest
@@ -1268,13 +1269,14 @@ _snapshots = SnapshotStore(app_paths.SNAPSHOTS_DIR)
 _runs = RunStore(app_paths.PLAYBOOK_RUNS_DIR)
 
 
-async def _build_player(pb: pbk.Playbook, attended: bool) -> PlaybookPlayer:
+async def _build_player(pb: pbk.Playbook, attended: bool, trim: bool = True) -> PlaybookPlayer:
     """The player for one run: the shared browser, the guard, and who answers its questions.
     mode "ask" always: the player's approver decides (a pre-approved step, the user, or - when nobody is
     there - a refusal), so a hand-edited APPROVAL_MODE can never make a playbook run looser than approved."""
     session = await _ensure_session()
     # Tab steps count tabs from the first one, so a playbook that has them starts from a single tab.
-    await trim_tabs(session, keep=1) if any(s.kind == "tab" for s in pb.steps) else await trim_tabs(session)
+    if trim:
+        await trim_tabs(session, keep=1) if any(s.kind == "tab" for s in pb.steps) else await trim_tabs(session)
     sensitive = linkedin_sensitive_data()
     approver = StepApprover(_broker, attended=attended)
     tools = GuardedTools(approver, mode="ask", secret_names={k for v in (sensitive or {}).values() for k in v},
@@ -1479,6 +1481,84 @@ async def draft_playbook():
         _log.exception("could not build a playbook draft")
         return _pb_error(500, f"Could not read the run: {type(e).__name__}: {e}")
     return {"ok": True, **draft.to_dict()}
+
+
+# --- Drafting a playbook from a description (playbook_draft.py): runs in the shared browser, so Stop and the live view work ---
+_drafts: dict[str, dict] = {}
+MAX_DRAFT_JOBS = 5
+
+
+async def draft_job(token: str, description: str, use_page: bool, allow_unnamed: bool) -> None:
+    job = _drafts[token]
+
+    async def say(text: str) -> None:
+        job["progress"].append(text[:200])
+        await _broadcast({"type": "action", "text": text})
+
+    try:
+        await _broadcast({"type": "status", "text": "running"})
+        session = await _ensure_session()
+        player = await _build_player(pbk.Playbook(name="Drafting a playbook", steps=[]), attended=False, trim=False)
+        player._notify = None                                     # progress comes from the drafter, not each step
+        digest, url = "", ""
+        if use_page:
+            url = await session.get_current_page_url()
+            digest = await playbook_suggest.digest_page(await session.get_current_page())
+        out = await playbook_draft.draft(
+            description, llm=_router.escalating("draft"), player=player, page=session.get_current_page,
+            select_llm=_router.escalating("selectors"),
+            choose=playbook_repair.Repairer(_router.escalating("repair"), session.get_current_page),
+            digest=digest, url=url, allow_unnamed=allow_unnamed, say=say)
+        job.update(status="done", result=out.to_dict())
+        await _broadcast({"type": "status", "text": "done"})
+    except asyncio.CancelledError:
+        job.update(status="stopped", error="Stopped by you.")
+        await _broadcast({"type": "status", "text": "done"})
+        raise
+    except (playbook_draft.DraftError, playbook_suggest.SuggestError) as e:
+        job.update(status="failed", error=str(e))
+        await _broadcast({"type": "status", "text": "error"})
+    except Exception as e:
+        _log.exception("drafting a playbook failed")
+        job.update(status="failed", error=f"Something went wrong ({type(e).__name__}: {str(e)[:150]}).")
+        await _broadcast({"type": "status", "text": "error"})
+
+
+@app.post("/playbooks/describe")
+async def describe_playbook(body: dict):
+    """Start drafting a playbook from words. It runs in the browser on the left (watch it, or press Stop); poll the token."""
+    description = body.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return _pb_error(400, "Say what you want the playbook to do.")
+    if len(description) > 1500:
+        return _pb_error(400, "That is too long. Describe the task in a few sentences (up to 1500 characters).")
+    try:
+        usable = model_tiers.read_slots()["standard"].usable
+    except Exception:
+        usable = False
+    if not usable:
+        return _pb_error(409, "No AI model is set up yet (see Settings), so there is nothing to draft with.")
+    token = secrets.token_hex(8)
+    _drafts[token] = {"status": "running", "progress": [], "result": None, "error": "", "started": time.time()}
+    try:
+        _ctl.start(lambda: _run_guarded(draft_job(token, description.strip(), body.get("use_page") is True,
+                                                  body.get("allow_unnamed") is True)),
+                   origin="Drafting a playbook", fmt="auto")
+    except Busy as e:
+        _drafts.pop(token, None)
+        return _pb_error(409, f"{e}. Wait for it to finish, then try again.")
+    for old in sorted(_drafts, key=lambda t: _drafts[t]["started"])[:-MAX_DRAFT_JOBS]:
+        _drafts.pop(old, None)
+    _touch_user()
+    return {"ok": True, "token": token}
+
+
+@app.get("/playbooks/describe/{token}")
+async def describe_status(token: str):
+    job = _drafts.get(token)
+    if job is None:
+        return _pb_error(404, "That draft is no longer kept.")
+    return {"ok": True, "status": job["status"], "progress": job["progress"][-30:], "error": job["error"], "result": job["result"]}
 
 
 async def _picker_page():

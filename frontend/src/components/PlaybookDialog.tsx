@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X, Trash2, BookMarked, History as HistoryIcon, Pencil, AlertTriangle } from 'lucide-react'
-import type { DamagedPlaybook, PlaybookSummary, ScheduleView } from '@/types'
+import type { DamagedPlaybook, DescribedDraft, PlaybookSummary, ScheduleView } from '@/types'
+import DescribeBox from './playbook/DescribeBox'
 import Editor from './playbook/Editor'
 import History from './playbook/History'
 import RunForm from './playbook/RunForm'
@@ -22,6 +23,7 @@ interface Props {
 type View =
   | { kind: 'library' }
   | { kind: 'save' }
+  | { kind: 'described'; draft: DescribedDraft }
   | { kind: 'edit'; id: string }
   | { kind: 'run'; id: string }
   | { kind: 'history'; id: string; name: string }
@@ -29,7 +31,7 @@ type View =
   | { kind: 'schedule'; existing: ScheduleView | null }
 
 const TITLE: Record<View['kind'], string> = {
-  library: 'Playbooks', save: 'Save this run as a playbook', edit: 'Edit playbook', run: 'Run a playbook', history: 'Run history',
+  library: 'Playbooks', save: 'Save this run as a playbook', described: 'Review the drafted playbook', edit: 'Edit playbook', run: 'Run a playbook', history: 'Run history',
   schedules: 'Schedules', schedule: 'Schedule',
 }
 
@@ -119,6 +121,7 @@ export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props
             busy={busy}
             notify={notify}
             onSave={() => setView({ kind: 'save' })}
+            onDrafted={(draft) => setView({ kind: 'described', draft })}
             onRun={(id) => setView({ kind: 'run', id })}
             onEdit={(id) => setView({ kind: 'edit', id })}
             onHistory={(id, name) => setView({ kind: 'history', id, name })}
@@ -126,6 +129,9 @@ export default function PlaybookDialog({ onClose, notify, canSave, busy }: Props
         )}
         {view.kind === 'save' && (
           <Editor mode="draft" onCancel={library} onSaved={(name) => { notify(`Saved the playbook "${name}".`); onClose() }} />
+        )}
+        {view.kind === 'described' && (
+          <Editor mode="draft" initial={view.draft} onCancel={library} onSaved={(name) => { notify(`Saved the playbook "${name}".`); onClose() }} />
         )}
         {view.kind === 'edit' && (
           <Editor mode="edit" id={view.id} onCancel={library} onSaved={(name, affected) => {
@@ -192,10 +198,11 @@ function Templates({ onCreated, onError }: { onCreated: (id: string, name: strin
 
 // ─── Library ──────────────────────────────────────────────────────────────────
 
-function Library({ canSave, busy, onSave, onRun, onEdit, onHistory, notify }: {
+function Library({ canSave, busy, onSave, onDrafted, onRun, onEdit, onHistory, notify }: {
   canSave: boolean
   busy: boolean
   onSave: () => void
+  onDrafted: (draft: DescribedDraft) => void
   onRun: (id: string) => void
   onEdit: (id: string) => void
   onHistory: (id: string, name: string) => void
@@ -259,6 +266,7 @@ function Library({ canSave, busy, onSave, onRun, onEdit, onHistory, notify }: {
           Save last run as playbook
         </button>
       </div>
+      <DescribeBox onDrafted={onDrafted} />
       {error && <p role="alert" className="mx-5 mb-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
         {rows === null && !error && <p className="py-8 text-center text-xs text-gray-400">Loading…</p>}

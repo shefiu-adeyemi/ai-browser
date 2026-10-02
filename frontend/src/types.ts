@@ -292,6 +292,26 @@ export interface PlaybookStepResult {
   tokens?: number | null         // what that used (prompt + answer), when the model reported it
 }
 
+/** How one step of a drafted playbook fared when it was tried on the page (server: playbook_draft.py). */
+export interface DraftReportItem {
+  n: number
+  kind: string
+  text: string
+  status: 'verified' | 'not_run' | 'unresolved' | 'failed' | 'left_out'
+  detail: string
+  sample?: { columns: string[]; rows: string[][]; total: number }
+}
+
+/** A playbook drafted from a description: unsaved, with the report of trying it. */
+export interface DescribedDraft {
+  playbook: Playbook
+  report: DraftReportItem[]
+  notes: string[]
+  tokens: number
+  model: string
+  counts: Record<string, number>
+}
+
 /** A step a run could only get through by repairing it (server: playbook_repair.py). */
 export interface RunRepair {
   step_id: string

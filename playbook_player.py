@@ -312,6 +312,25 @@ class PlaybookPlayer:
         if errors:
             return finish("failed", "Check the inputs: " + "; ".join(errors))
 
+        await self._begin(pb, values, approved, done, answers, skipped)
+        total = len(pb.steps)
+        i = 0
+        while i < total:
+            step = pb.steps[i]
+            ended = await self._exec(result, step, i + 1, total, finish)
+            if ended is not None:
+                return ended
+            if step.kind == "foreach":
+                ended = await self._run_loop(result, pb, i, total, finish)
+                if ended is not None:
+                    return ended
+                i += step.body or 0
+            i += 1
+        return finish("done")
+
+    async def _begin(self, pb: Playbook, values: dict, approved: Optional[set[str]] = None, done: Optional[set[str]] = None,
+                     answers: Optional[dict[str, str]] = None, skipped: Optional[set[str]] = None) -> None:
+        """Set up the state of one run. Split from run() so a drafting walk can use the real step logic one step at a time."""
         self._preapproved_playbook = pbk.is_approved(pb)
         # A playbook that signs in by itself (a stored secret typed into a field) or asks the user to
         # (a handoff step) has its own answer to a sign-in page, so the generic wall check stays out of it.
@@ -334,7 +353,6 @@ class PlaybookPlayer:
             allowed = [start] if start else []
         self._allowed = allowed
 
-        total = len(pb.steps)
         self._left_out = False                                        # a step was skipped because nobody answered
         self._tables: dict[str, dict] = {}                            # what each scrape step read, for a foreach step
         self._pending_loop: Optional[dict] = None
@@ -343,19 +361,6 @@ class PlaybookPlayer:
         self._scrape_override: dict[str, tuple[Optional[str], list[dict]]] = {}      # selectors a repair found, for the rest of the run
         self._loop_ctx: Optional[tuple[str, str]] = None
         self._cells_left = MAX_RUN_CELLS
-        i = 0
-        while i < total:
-            step = pb.steps[i]
-            ended = await self._exec(result, step, i + 1, total, finish)
-            if ended is not None:
-                return ended
-            if step.kind == "foreach":
-                ended = await self._run_loop(result, pb, i, total, finish)
-                if ended is not None:
-                    return ended
-                i += step.body or 0
-            i += 1
-        return finish("done")
 
     async def _exec(self, result: RunResult, step: Step, n: int, total: int, finish: Callable[..., RunResult],
                     row: Optional[tuple[int, int]] = None) -> Optional[RunResult]:
