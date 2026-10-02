@@ -65,6 +65,7 @@ SUGGESTED: dict[str, dict[str, str]] = {
     "openai":   {"fast": "gpt-5-mini", "strong": "gpt-5"},
     "gemini":   {"fast": "gemini-2.5-flash", "strong": "gemini-2.5-pro"},
     "deepseek": {"fast": "deepseek-v4-flash", "strong": "deepseek-v4-pro"},
+    "qwen":     {"fast": "qwen3-vl-flash", "strong": "qwen3.7-plus"},     # both can see screenshots, which a retry needs
 }
 
 CLASS_ESCALATION_PAUSE = 0.0                        # seconds before trying the next tier (tests keep it zero)

@@ -493,6 +493,7 @@ const SETTING_NAMES: Record<string, string> = {
   OPENAI_API_KEY: 'OpenAI API key',
   GEMINI_API_KEY: 'Gemini API key',
   DEEPSEEK_API_KEY: 'DeepSeek API key',
+  QWEN_API_KEY: 'Qwen API key',
   LINKEDIN_EMAIL: 'LinkedIn email',
   LINKEDIN_PASSWORD: 'LinkedIn password',
   MAX_STEPS: 'Max steps',

@@ -32,7 +32,7 @@ _KEY_SHAPES = re.compile(
 
 _ALLOWED_PREFIXES = ("browser_use.Agent", "browser_use.agent", "browser_use.tools", "browser_use.Tools")
 
-SECRET_ENV_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY",
+SECRET_ENV_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "QWEN_API_KEY",
                    "LINKEDIN_PASSWORD", "LINKEDIN_EMAIL")
 
 

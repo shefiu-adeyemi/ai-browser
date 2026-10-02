@@ -15,6 +15,11 @@ Built on [browser-use](https://github.com/browser-use/browser-use) with a FastAP
 4. Start it: `python agent_ui.py` and open <http://localhost:8000>
    (or use `launch.bat` / `AI Browser Agent.exe`, which start it without a console window).
 5. Open **Settings** in the app, choose a provider and paste its API key.
+   Providers: Claude, OpenAI, Gemini, DeepSeek and Qwen. **Qwen** (Alibaba Cloud Model Studio) defaults to
+   `qwen3.7-plus`, a multimodal model that sees screenshots at a fraction of the big models' price. Its key
+   belongs to one region: international keys work out of the box; for a mainland-China key set `QWEN_BASE_URL`
+   (see `.env.example`). DeepSeek and text-only Qwen models work from the page's text and elements instead of
+   screenshots, and the end-of-run check is off for them.
    Optional: under **Model tiers** set a cheaper Fast model and a Strong model; unset slots use your chosen model. You can pick a tier per task (next to the task box) and per page-reading step of a playbook.
 
 Your keys and browser profiles are stored **outside this folder**, in

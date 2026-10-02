@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from browser_use import Agent
 from browser_use.browser.session import BrowserSession
-from llm_config import get_llm
+from llm_config import get_llm, supports_vision
 import model_tiers
 import app_paths
 import env_store
@@ -332,11 +332,12 @@ def _max_retries() -> int:
     return _as_int(os.getenv("MAX_RETRIES"), 1, low=0, high=3)
 
 
-def _judge_enabled(provider: str) -> bool:
+def _judge_enabled(provider: str, vision: bool = True) -> bool:
     """browser-use's judge reviews the whole run (steps + screenshots) and returns a verdict. It
     costs one extra LLM call per run, so USE_JUDGE=0 turns it off (results then show as
-    "not checked"). DeepSeek can't do the structured output it needs, so it is always off there."""
-    if provider == "deepseek":
+    "not checked"). DeepSeek can't do the structured output it needs, so it is always off there, and it is
+    off for any model that can't see screenshots (the reviewer sends them, and a text-only model refuses)."""
+    if provider == "deepseek" or not vision:
         return False
     return os.getenv("USE_JUDGE", "1").strip().lower() not in ("0", "off", "false", "no")
 
@@ -433,7 +434,7 @@ def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
         std_provider = os.getenv("LLM_PROVIDER", "claude").lower()
         try:
             extra["judge_llm"] = _router.llm("judge")
-            extra["use_judge"] = _judge_enabled(std_provider)
+            extra["use_judge"] = _judge_enabled(std_provider, supports_vision(std_provider, getattr(extra["judge_llm"], "model", None)))
         except Exception:
             _log.exception("could not set up the reviewer on the Standard model; it uses the task's own model")
     # Every action passes through GuardedTools: credentials only into login fields,
@@ -444,6 +445,7 @@ def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
         notify=_broadcast,
         task=task,
     )
+    can_see = supports_vision(provider, getattr(llm, "model", None))
     return Agent(
         task=task_text,
         llm=llm,
@@ -452,8 +454,8 @@ def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
         tools=tools,
         extend_system_message=SAFETY_PROMPT,
         max_actions_per_step=1,
-        use_vision=provider != "deepseek",
-        **{"use_judge": _judge_enabled(provider), **extra},
+        use_vision=can_see,
+        **{"use_judge": _judge_enabled(provider, can_see), **extra},
         **_agent_tier_kwargs(),
     )
 
@@ -1077,12 +1079,12 @@ async def answer_approval(aid: str, body: dict):
 
 SETTINGS_KEYS = [
     "LLM_PROVIDER", "LLM_MODEL", "LLM_FAST_PROVIDER", "LLM_FAST_MODEL", "LLM_STRONG_PROVIDER", "LLM_STRONG_MODEL",
-    "LLM_ROUTER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY",
+    "LLM_ROUTER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "QWEN_API_KEY",
     "LINKEDIN_EMAIL", "LINKEDIN_PASSWORD", "MAX_STEPS", "CONTEXT_TURNS", "APPROVAL_MODE",
 ]
 
 _SECRET_KEYS = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
-                "DEEPSEEK_API_KEY", "LINKEDIN_PASSWORD"}
+                "DEEPSEEK_API_KEY", "QWEN_API_KEY", "LINKEDIN_PASSWORD"}
 _MASK = "•"  # bullet; any saved value starting with it is a mask, not a secret
 
 def _mask(key: str, value: str) -> str:

@@ -13,7 +13,7 @@ import llm_config
 import providers
 
 KEYS = {"ANTHROPIC_API_KEY": "sk-ant-test1234567", "OPENAI_API_KEY": "sk-test1234567",
-        "GEMINI_API_KEY": "AIzaTest1234567", "DEEPSEEK_API_KEY": "sk-deep1234567"}
+        "GEMINI_API_KEY": "AIzaTest1234567", "DEEPSEEK_API_KEY": "sk-deep1234567", "QWEN_API_KEY": "sk-qwen1234567"}
 ROOT = pathlib.Path(__file__).parent
 
 
@@ -25,7 +25,7 @@ def build(provider="", model="", **extra):
 
 class Clients(unittest.TestCase):
     def test_each_provider_builds_its_native_client_with_the_table_default(self):
-        expected = {"claude": "ChatAnthropic", "openai": "ChatOpenAI", "gemini": "ChatGoogle", "deepseek": "ChatDeepSeek"}
+        expected = {"claude": "ChatAnthropic", "openai": "ChatOpenAI", "gemini": "ChatGoogle", "deepseek": "ChatDeepSeek", "qwen": "ChatOpenAI"}
         for p in providers.PROVIDERS:
             llm = build(p.id)
             self.assertEqual(type(llm).__name__, expected[p.id], p.id)
@@ -47,6 +47,45 @@ class Clients(unittest.TestCase):
         """Each provider must read ITS key: DeepSeek must not pick up the Anthropic key."""
         self.assertEqual(build("deepseek").api_key, KEYS["DEEPSEEK_API_KEY"])
         self.assertEqual(build("claude").api_key, KEYS["ANTHROPIC_API_KEY"])
+
+
+class Qwen(unittest.TestCase):
+    def test_it_talks_to_alibabas_endpoint_with_its_own_key(self):
+        llm = build("qwen")
+        self.assertEqual((llm.model, llm.api_key), ("qwen3.7-plus", KEYS["QWEN_API_KEY"]))
+        self.assertEqual(str(llm.base_url), llm_config.QWEN_BASE_URL)
+        self.assertIn("dashscope-intl", str(llm.base_url))                  # international region by default
+        self.assertIsNone(llm.frequency_penalty)                            # OpenAI-only guard, not sent to Alibaba
+
+    def test_a_mainland_key_can_point_at_the_mainland_endpoint(self):
+        llm = build("qwen", QWEN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.assertEqual(str(llm.base_url), "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+    def test_names_people_type_resolve(self):
+        for alias in ("Alibaba", "dashscope", " QWEN "):
+            self.assertEqual(providers.resolve_provider_id(alias), "qwen", alias)
+        self.assertEqual(providers.strip_model_prefix("qwen/qwen3.7-plus"), "qwen3.7-plus")
+
+    def test_the_default_model_can_see_screenshots(self):
+        self.assertTrue(llm_config.supports_vision("qwen", providers.BY_ID["qwen"].default_model))
+
+    def test_which_models_can_see(self):
+        for model in ("qwen3.7-plus", "qwen3-vl-plus", "qwen3-vl-flash", "qwen/qwen3.7-plus", "Qwen3.7-Plus", "qwen-omni-turbo", None, ""):
+            self.assertTrue(llm_config.supports_vision("qwen", model), model)
+        for model in ("qwen3.7-max", "qwen-plus", "qwen3-coder-plus", "something-new"):
+            self.assertFalse(llm_config.supports_vision("qwen", model), model)     # unknown = no: a text-only model refuses images
+
+    def test_other_providers_are_unchanged(self):
+        self.assertFalse(llm_config.supports_vision("deepseek", "deepseek-v4-pro"))
+        for p in ("claude", "openai", "gemini"):
+            self.assertTrue(llm_config.supports_vision(p, "anything"), p)
+
+    def test_a_missing_key_says_so(self):
+        with mock.patch.dict(os.environ, {"QWEN_API_KEY": ""}):
+            with self.assertRaises(llm_config.LLMConfigError) as cm:
+                llm_config.build_llm("qwen")
+        self.assertIn("Qwen", str(cm.exception))
+        self.assertIn("QWEN_API_KEY", str(cm.exception))
 
 
 class Errors(unittest.TestCase):

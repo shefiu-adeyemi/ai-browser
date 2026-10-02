@@ -31,16 +31,22 @@ PROVIDERS: tuple[Provider, ...] = (
              ("gemini-2.5-flash", "gemini-2.5-pro")),
     Provider("deepseek", "DeepSeek", "DEEPSEEK_API_KEY", "deepseek-v4-pro",
              ("deepseek-v4-pro", "deepseek-v4-flash")),
+    # Qwen (Alibaba Cloud Model Studio / DashScope) through its OpenAI-compatible endpoint. The default is
+    # the mid-priced multimodal model: it sees screenshots and is built for browser and GUI agent work, at
+    # roughly a tenth of the price of the big Western models. qwen3.7-max is stronger but dearer, the qwen3-vl
+    # models are older and cheaper; llm_config.supports_vision() says which of them can take screenshots.
+    Provider("qwen", "Qwen (Alibaba)", "QWEN_API_KEY", "qwen3.7-plus",
+             ("qwen3.7-plus", "qwen3-vl-plus", "qwen3-vl-flash", "qwen3.7-max")),
 )
 
 BY_ID = {p.id: p for p in PROVIDERS}
 DEFAULT_PROVIDER = "claude"
 
 # Names people naturally type, or that older versions of the UI saved.
-_ALIASES = {"anthropic": "claude", "google": "gemini"}
+_ALIASES = {"anthropic": "claude", "google": "gemini", "alibaba": "qwen", "dashscope": "qwen"}
 
 # Older setups used LiteLLM-style names such as "deepseek/deepseek-v4-pro".
-_MODEL_PREFIXES = ("anthropic/", "claude/", "openai/", "gemini/", "google/", "deepseek/")
+_MODEL_PREFIXES = ("anthropic/", "claude/", "openai/", "gemini/", "google/", "deepseek/", "qwen/", "alibaba/")
 
 
 def resolve_provider_id(raw: Optional[str]) -> Optional[str]:

@@ -65,6 +65,7 @@ export interface Settings {
   OPENAI_API_KEY: string
   GEMINI_API_KEY: string
   DEEPSEEK_API_KEY: string
+  QWEN_API_KEY: string
   LINKEDIN_EMAIL: string
   LINKEDIN_PASSWORD: string
   MAX_STEPS: number

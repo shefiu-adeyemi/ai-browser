@@ -1,0 +1,45 @@
+"""How the agent is set up for each model: does it use screenshots, and is the end-of-run check on? No browser,
+no model: browser-use's Agent is replaced by a recorder, so this only tests OUR decision."""
+import os as _os, tempfile as _tf
+_os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
+
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+import agent_ui
+
+
+def setup_for(provider, model):
+    seen = {}
+    with mock.patch.object(agent_ui, "Agent", side_effect=lambda **kw: seen.update(kw)), \
+            mock.patch.object(agent_ui, "linkedin_login_instructions", create=True, return_value=""), \
+            mock.patch.dict(_os.environ, {"USE_JUDGE": "1"}):
+        agent_ui._new_agent("do it", "do it", SimpleNamespace(model=model), session=mock.Mock(), sensitive_data=None,
+                            provider=provider)
+    return seen
+
+
+class Vision(unittest.TestCase):
+    def test_a_model_that_sees_gets_screenshots_and_the_end_of_run_check(self):
+        for provider, model in (("qwen", "qwen3.7-plus"), ("qwen", "qwen3-vl-flash"), ("claude", "claude-sonnet-5-5"),
+                                ("openai", "gpt-4o"), ("gemini", "gemini-2.5-flash")):
+            kw = setup_for(provider, model)
+            self.assertTrue(kw["use_vision"], (provider, model))
+            self.assertTrue(kw["use_judge"], (provider, model))
+
+    def test_a_text_only_model_gets_neither(self):
+        for provider, model in (("qwen", "qwen3.7-max"), ("qwen", "qwen-plus"), ("deepseek", "deepseek-v4-pro")):
+            kw = setup_for(provider, model)
+            self.assertFalse(kw["use_vision"], (provider, model))
+            self.assertFalse(kw["use_judge"], (provider, model))            # the reviewer sends screenshots too
+
+    def test_the_judge_switch_still_works(self):
+        with mock.patch.dict(_os.environ, {"USE_JUDGE": "0"}):
+            self.assertFalse(agent_ui._judge_enabled("qwen", True))
+        self.assertFalse(agent_ui._judge_enabled("qwen", False))
+        self.assertTrue(agent_ui._judge_enabled("qwen", True))
+
+
+if __name__ == "__main__":
+    unittest.main()

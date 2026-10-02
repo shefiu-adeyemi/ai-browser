@@ -8,6 +8,7 @@ this file, the settings screen and .env.example cannot drift apart again.
   openai    OpenAI             OPENAI_API_KEY      browser-use ChatOpenAI  (native, no LiteLLM)
   gemini    Google Gemini      GEMINI_API_KEY      browser-use ChatGoogle
   deepseek  DeepSeek           DEEPSEEK_API_KEY    browser-use ChatDeepSeek (native, no LiteLLM)
+  qwen      Qwen (Alibaba)     QWEN_API_KEY        browser-use ChatOpenAI pointed at Alibaba's OpenAI-compatible endpoint
 
 DeepSeek used to go through LiteLLM with a process-wide monkeypatch. The native client sends the
 schema as a forced function call, which DeepSeek supports, so no workaround is needed. There is
@@ -24,6 +25,24 @@ import providers
 from browser_use.llm.base import BaseChatModel
 
 MAX_OUTPUT_TOKENS = 8192
+
+# Alibaba Cloud Model Studio's OpenAI-compatible endpoint. The key belongs to ONE region: an international key
+# (the default) does not work against the mainland endpoint or the other way round. Set QWEN_BASE_URL for the
+# mainland one: https://dashscope.aliyuncs.com/compatible-mode/v1
+QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+
+def supports_vision(provider_id: str, model: Optional[str] = None) -> bool:
+    """Can this model take screenshots? When it can't, the agent works from the page's text and element list
+    alone (browser-use's main way of reading a page) and the end-of-run check, which needs to see the page, is off.
+    Unknown models are assumed NOT to, because a text-only model sent an image fails the whole run."""
+    if provider_id == "deepseek":
+        return False
+    if provider_id == "qwen":
+        name = providers.strip_model_prefix(model or "").lower() or providers.BY_ID["qwen"].default_model
+        # The Qwen3.7 "plus" tier and every "-vl-" / omni model are multimodal; "max" and plain text models are not.
+        return "-vl-" in name or "omni" in name or name.startswith("qwen3.7-plus")
+    return True
 
 
 class LLMConfigError(ValueError):
@@ -60,6 +79,12 @@ def build_llm(provider_id: str, model: Optional[str] = None) -> BaseChatModel:
     if provider_id == "gemini":
         from browser_use.llm import ChatGoogle
         return ChatGoogle(model=model, api_key=api_key, max_output_tokens=MAX_OUTPUT_TOKENS)
+
+    if provider_id == "qwen":
+        from browser_use.llm import ChatOpenAI
+        # frequency_penalty is browser-use's guard for an OpenAI quirk; Alibaba's endpoint doesn't need it.
+        return ChatOpenAI(model=model, api_key=api_key, base_url=(os.getenv("QWEN_BASE_URL") or "").strip() or QWEN_BASE_URL,
+                          max_completion_tokens=MAX_OUTPUT_TOKENS, frequency_penalty=None)
 
     # deepseek
     from browser_use.llm.deepseek.chat import ChatDeepSeek

@@ -121,7 +121,7 @@ class ProvidersAndDefaults(SettingsCase):
     def test_the_server_tells_the_ui_which_providers_and_models_exist(self):
         """The UI had its own list with 'anthropic' where the server only knows 'claude'."""
         info = self.get()["PROVIDERS"]
-        self.assertEqual([p["id"] for p in info], ["claude", "openai", "gemini", "deepseek"])
+        self.assertEqual([p["id"] for p in info], ["claude", "openai", "gemini", "deepseek", "qwen"])
         claude = info[0]
         self.assertEqual((claude["default_model"], claude["key_env"]), ("claude-sonnet-5-5", "ANTHROPIC_API_KEY"))
         self.assertIn("claude-sonnet-5-5", claude["models"])
