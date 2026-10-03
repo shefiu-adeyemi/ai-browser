@@ -22,8 +22,11 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
+from browser_use import BrowserSession
 from browser_use.agent.views import ActionResult
 from browser_use.tools.service import Tools
+
+import form_options
 
 log = logging.getLogger(__name__)
 
@@ -196,6 +199,12 @@ def classify(name: str, params: dict, node: Any, url: str, *, secret_names: set[
             return Verdict("ask", f'Click "{label[:80] or _tag(node)}" on {host}?', detail, auto=True)
         return ALLOW
 
+    if name == "set_option":
+        label = str(params.get("label", ""))
+        if params.get("checked", True) and _RISKY_LABEL.search(label):     # ticking "Subscribe", "Allow" ... reaches beyond the page
+            return Verdict("ask", f'Tick "{label[:80]}" on {host}?', "", auto=True)
+        return ALLOW
+
     if name == "send_keys":
         presses, tabs = _activates(params.get("keys", ""))
         if not presses:
@@ -253,6 +262,32 @@ class GuardedTools(Tools):
                 return ActionResult(extracted_content="The user completed the step. Continue the task.",
                                     long_term_memory="User completed the requested manual step.")
             return ActionResult(error="The user did not respond. Stop and report what is blocking you.")
+
+        @self.action(
+            "List the checkboxes, radio buttons and switches on the page with their label and whether each "
+            "is ticked. Use this when a form's options have no number in the page listing, or to check "
+            "which are ticked."
+        )
+        async def list_options(browser_session: BrowserSession) -> ActionResult:
+            try:
+                text = form_options.describe(await form_options.list_options(await browser_session.get_current_page()))
+            except Exception as e:
+                return ActionResult(error=f"Could not read the options on this page ({type(e).__name__}).")
+            return ActionResult(extracted_content=text, include_in_memory=True)
+
+        @self.action(
+            "Tick (checked=true) or untick (checked=false) the checkbox, radio button or switch with this "
+            "visible label, e.g. label='Want something in particular?'. Works even when the option has no "
+            "number in the page listing. Say the label as shown on the page."
+        )
+        async def set_option(label: str, browser_session: BrowserSession, checked: bool = True) -> ActionResult:
+            try:
+                ok, message = await form_options.set_option(await browser_session.get_current_page(), label, checked)
+            except Exception as e:
+                return ActionResult(error=f"Could not change the option ({type(e).__name__}).")
+            if not ok:
+                return ActionResult(error=message)
+            return ActionResult(extracted_content=message, long_term_memory=message)
 
     async def _say(self, text: str) -> None:
         if self._notify:
