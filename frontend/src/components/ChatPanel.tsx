@@ -354,60 +354,6 @@ function WelcomeState({ onSelect }: { onSelect: (p: string) => void }) {
   )
 }
 
-// ─── Format dropdown ───────────────────────────────────────────────────────────
-
-const FORMAT_OPTIONS: { value: FormatOption; label: string }[] = [
-  { value: 'auto',    label: 'Auto' },
-  { value: 'json',    label: 'JSON' },
-  { value: 'bullets', label: 'Bullets' },
-  { value: 'table',   label: 'Table' },
-]
-
-function FormatDropdown({
-  value,
-  onChange,
-}: {
-  value: FormatOption
-  onChange: (v: FormatOption) => void
-}) {
-  return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button
-          aria-label={`Answer format: ${FORMAT_OPTIONS.find((o) => o.value === value)?.label}`}
-          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors px-1 py-0.5 rounded"
-        >
-          {FORMAT_OPTIONS.find((o) => o.value === value)?.label}
-          <ChevronDown size={11} />
-        </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          side="top"
-          align="start"
-          sideOffset={6}
-          className="z-50 min-w-[100px] bg-white rounded-xl shadow-card border border-gray-100 p-1 animate-fade-in"
-        >
-          {FORMAT_OPTIONS.map((opt) => (
-            <DropdownMenu.Item
-              key={opt.value}
-              onSelect={() => onChange(opt.value)}
-              className={cn(
-                'px-3 py-1.5 rounded-lg text-xs cursor-pointer outline-none transition-colors',
-                value === opt.value
-                  ? 'bg-brand-tint text-brand font-medium'
-                  : 'text-gray-700 hover:bg-gray-50',
-              )}
-            >
-              {opt.label}
-            </DropdownMenu.Item>
-          ))}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
-  )
-}
-
 // ─── Continue bar (shown when paused) ─────────────────────────────────────────
 
 function ContinueBar({
@@ -1185,7 +1131,6 @@ function InputCard({
   const [value, setValue] = useState(() => {
     try { return localStorage.getItem(DRAFT_KEY) ?? '' } catch { return '' }
   })
-  const [fmt, setFmt] = useState<FormatOption>('auto')
   const [tier, setTierState] = useState<TierChoice>(() => {
     try {
       const saved = localStorage.getItem('agent_tier')
@@ -1225,8 +1170,8 @@ function InputCard({
     const task = value.trim()
     if (!task || status === 'running' || status === 'paused') return
     setValuePersisted('')
-    onSend(task, fmt, tier)
-  }, [value, status, onSend, fmt, tier, setValuePersisted])
+    onSend(task, 'auto', tier)
+  }, [value, status, onSend, tier, setValuePersisted])
 
   const handleKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1257,7 +1202,7 @@ function InputCard({
           onBlur={() => setFocused(false)}
           disabled={running}
           aria-label="Task for the agent"
-          placeholder={running ? 'Working… press Stop to give it a different task' : 'Describe a task for the agent…'}
+          placeholder={running ? 'Working… stop the task to give it a different one' : 'Describe a task for the agent…'}
           rows={1}
           className="w-full px-4 pt-3.5 pb-1 text-[14px] text-gray-800 placeholder:text-gray-400 resize-none border-none outline-none bg-transparent leading-relaxed disabled:opacity-60"
           style={{ minHeight: '52px', maxHeight: '150px' }}
@@ -1266,16 +1211,15 @@ function InputCard({
         <div className="flex items-center gap-2 px-3.5 pb-3 pt-1">
           <ModelPicker disabled={running} refreshKey={settingsVersion} onOpenSettings={onOpenSettings} />
           <TierPicker value={tier} onChange={setTier} disabled={running} refreshKey={settingsVersion} />
-          <FormatDropdown value={fmt} onChange={setFmt} />
           <div className="flex-1" />
           {running ? (
             <button
               onClick={onStop}
               aria-label="Stop the task"
-              className="flex items-center gap-1.5 h-8 px-3 rounded-xl bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-600 text-xs font-medium transition-all"
+              title="Stop the task"
+              className="w-8 h-8 rounded-xl flex items-center justify-center bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-600 transition-all"
             >
               <Square size={11} className="fill-current" />
-              Stop
             </button>
           ) : (
             <button
