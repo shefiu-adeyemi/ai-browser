@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react'
 import BrowserChrome, { type BrowserActions } from '@/components/BrowserChrome'
 import { Status, InputMessage, type BrowserState } from '@/types'
 import { cn } from '@/lib/utils'
+import { viewSize } from '@/lib/viewLayout'
 
 interface BrowserPaneProps {
   screenshot: string | null
@@ -129,9 +130,8 @@ export default function BrowserPane({
   const nativeSizeRef = useRef({ w: 1280, h: 800 })
   const frameSeqRef = useRef(0)   // latest frame wins if decodes finish out of order
 
-  // How the page is laid out in the pane. "Fill" zooms in a little (10% to 25%) so the grey bands shrink or
-  // vanish, which crops the edges; "Fit" shows the whole page with bands where the shapes differ.
-  const MAX_ZOOM = 1.15   // Fill never zooms more than this over Fit (more would crop too much of a left-aligned page)
+  // How the page is laid out in the pane (lib/viewLayout): "Fit" shows the whole page with bands where the
+  // shapes differ; "Fill" zooms in a little so the bands shrink, never cropping the sides.
   const areaRef = useRef<HTMLDivElement>(null)
   const [area, setArea] = useState({ w: 0, h: 0 })
   const [frameSize, setFrameSize] = useState({ w: 1280, h: 800 })
@@ -152,18 +152,7 @@ export default function BrowserPane({
     setArea({ w: el.clientWidth, h: el.clientHeight })
     return () => ro.disconnect()
   }, [])
-  const shown = (() => {
-    const fw = viewport?.w ?? frameSize.w
-    const fh = viewport?.h ?? frameSize.h
-    if (!area.w || !area.h || !fw || !fh) return null
-    const contain = Math.min(area.w / fw, area.h / fh)
-    const cover = Math.max(area.w / fw, area.h / fh)
-    // Fill: zoom in until the page covers the pane, but never by more than 15% over
-    // "Fit" (on a tall, narrow pane covering it would hide half the page). Whatever is left over is
-    // cropped at the bottom and equally on the two sides, never at the top (a page's header must stay visible).
-    const k = fill ? Math.min(cover, contain * MAX_ZOOM) : contain
-    return { w: Math.round(fw * k), h: Math.round(fh * k) }
-  })()
+  const shown = viewSize(area, { w: viewport?.w ?? frameSize.w, h: viewport?.h ?? frameSize.h }, fill)
   useEffect(() => {
     if (viewport) nativeSizeRef.current = viewport
   }, [viewport])
