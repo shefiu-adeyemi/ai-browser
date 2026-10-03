@@ -221,6 +221,13 @@ def _clean_one(key: str, value) -> Optional[str]:
         if not _MODEL_RE.match(model):
             raise ValueError("is not a valid model name (letters, digits and . _ : / @ + - only)")
         return model
+    if key == "AGENT_SPEED":
+        word = text.lower()
+        if word in ("fast", "careful"):
+            return word
+        if word == "auto":
+            return None
+        raise ValueError("must be fast, careful or auto")
     if key == "LLM_VISION":
         word = text.lower()
         if word in ("1", "true", "yes", "on"):

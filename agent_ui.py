@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from browser_use import Agent
 from browser_use.browser.session import BrowserSession
-from llm_config import builtin_vision, get_llm, supports_vision
+from llm_config import builtin_vision, fast_mode, get_llm, supports_vision
 import model_tiers
 import app_paths
 import env_store
@@ -465,6 +465,7 @@ def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
         task=task,
     )
     can_see = supports_vision(provider, getattr(llm, "model", None))
+    fast = fast_mode(provider)
     return Agent(
         task=task_text,
         llm=llm,
@@ -472,7 +473,9 @@ def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
         sensitive_data=sensitive_data,
         tools=tools,
         extend_system_message=SAFETY_PROMPT,
-        max_actions_per_step=1,
+        max_actions_per_step=3 if fast else 1,
+        flash_mode=fast,
+        enable_planning=not fast,
         use_vision=can_see,
         **{"use_judge": _judge_enabled(provider, can_see), **extra},
         **_agent_tier_kwargs(),
@@ -1142,7 +1145,7 @@ async def answer_approval(aid: str, body: dict):
 
 SETTINGS_KEYS = [
     "LLM_PROVIDER", "LLM_MODEL", "LLM_FAST_PROVIDER", "LLM_FAST_MODEL", "LLM_STRONG_PROVIDER", "LLM_STRONG_MODEL",
-    "LLM_ROUTER", "LLM_VISION", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "QWEN_API_KEY",
+    "LLM_ROUTER", "LLM_VISION", "AGENT_SPEED", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "QWEN_API_KEY",
     "LINKEDIN_EMAIL", "LINKEDIN_PASSWORD", "MAX_STEPS", "CONTEXT_TURNS", "APPROVAL_MODE",
 ]
 
@@ -1174,6 +1177,7 @@ async def get_settings():
         d[tier_key] = providers.strip_model_prefix(d[tier_key])
     d["LLM_ROUTER"] = "off" if d["LLM_ROUTER"].strip().lower() == "off" else "auto"
     d["LLM_VISION"] = d["LLM_VISION"].strip() if d["LLM_VISION"].strip() in ("0", "1") else ""   # "" = automatic
+    d["AGENT_SPEED"] = d["AGENT_SPEED"].strip().lower() if d["AGENT_SPEED"].strip().lower() in ("fast", "careful") else ""
     d["TIERS"] = model_tiers.describe()                  # what each slot really resolves to, and why
     d["APPROVAL_MODE"] = d["APPROVAL_MODE"] or "ask"
     d["UNREADABLE"] = env_store.unreadable_secrets(ENV_PATH)     # stored secrets this account can't decrypt

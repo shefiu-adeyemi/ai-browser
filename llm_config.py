@@ -32,6 +32,18 @@ MAX_OUTPUT_TOKENS = 8192
 QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 
+def fast_mode(provider_id: str) -> bool:
+    """Should the agent run in fast mode? Settings (AGENT_SPEED = fast / careful) wins; left on automatic, DeepSeek
+    runs fast because its replies to the agent's full output format fail validation often (about four steps in
+    ten in a real LinkedIn run), and every failure is a whole wasted, slow model call. Fast mode asks the model
+    for much less (just a note and the action), lets it do up to three actions per step and skips the separate
+    planning calls."""
+    value = (os.getenv("AGENT_SPEED") or "").strip().lower()
+    if value in ("fast", "careful"):
+        return value == "fast"
+    return provider_id == "deepseek"
+
+
 def vision_override() -> Optional[bool]:
     """The user's own answer from Settings ("this model can / cannot see screenshots"), or None for automatic."""
     value = (os.getenv("LLM_VISION") or "").strip().lower()

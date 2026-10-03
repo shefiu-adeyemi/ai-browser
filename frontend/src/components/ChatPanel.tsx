@@ -8,6 +8,7 @@ import { Slider } from '@/components/ui/slider'
 import CopyButton from '@/components/CopyButton'
 import ModelTiers from '@/components/ModelTiers'
 import VisionToggle from '@/components/VisionToggle'
+import SpeedSetting from '@/components/SpeedSetting'
 import TierPicker, { type TierChoice } from '@/components/TierPicker'
 import { cn, formatDuration, formatDate, plural } from '@/lib/utils'
 import {
@@ -486,6 +487,7 @@ const SETTING_NAMES: Record<string, string> = {
   LLM_PROVIDER: 'Provider',
   LLM_MODEL: 'Model',
   LLM_VISION: 'Vision',
+  AGENT_SPEED: 'Speed',
   LLM_FAST_PROVIDER: 'Fast model provider',
   LLM_FAST_MODEL: 'Fast model',
   LLM_STRONG_PROVIDER: 'Strong model provider',
@@ -726,6 +728,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
           />
         </FieldRow>
         {active && <VisionToggle providerId={active.id} model={settings.LLM_MODEL || active.default_model} value={settings.LLM_VISION ?? ''} onChange={(v) => update('LLM_VISION', v)} />}
+        {active && <SpeedSetting providerId={active.id} value={settings.AGENT_SPEED ?? ''} onChange={(v) => update('AGENT_SPEED', v)} />}
         {/* API key for the active provider lives here */}
         {(() => {
           if (!active) return null

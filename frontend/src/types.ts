@@ -61,6 +61,7 @@ export interface ProviderInfo {
 export interface Settings {
   LLM_PROVIDER: string
   LLM_MODEL: string
+  AGENT_SPEED: string   // '' = automatic, 'fast' or 'careful'
   LLM_VISION: string   // '' = automatic, '1' = yes, '0' = no (about the Standard model)
   ANTHROPIC_API_KEY: string
   OPENAI_API_KEY: string
