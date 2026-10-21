@@ -26,7 +26,7 @@ import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from aiba.playbooks import model as pbk
 from aiba.scheduling import schedules as sch

@@ -7,6 +7,7 @@ from aiba.playbooks import model as pbk
 from aiba.scheduling import schedules as sch
 from aiba.playbooks.model import Check, Playbook, Step, Variable
 from aiba.scheduling.schedules import Cadence, Schedule
+from pydantic import ValidationError
 
 NOW = datetime(2026, 10, 1, 12, 0, 0)          # a Thursday
 
@@ -102,7 +103,7 @@ class Quiet(unittest.TestCase):
         self.assertTrue(sch.quiet_problems(self.q("25:00", "07:00")))
         self.assertTrue(sch.quiet_problems(self.q("22:00", "7am")))
         self.assertTrue(any("same time" in p for p in sch.quiet_problems(self.q("08:00", "08:00"))))
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             sch.QuietHours(enabled=True, start="22:00", end="07:00", note="x")
 
 
@@ -133,13 +134,13 @@ class CadenceRules(unittest.TestCase):
         self.assertTrue(sch.cadence_problems(Cadence(kind="daily", at="09:00", weekdays=[1]), NOW))
 
     def test_the_interval_has_limits(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Cadence(kind="interval", every_minutes=1)                  # too often
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Cadence(kind="interval", every_minutes=sch.MAX_INTERVAL_MINUTES + 1)
 
     def test_unknown_fields_are_refused(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Cadence(kind="daily", at="09:00", cron="* * * * *")
 
 
@@ -210,7 +211,7 @@ class Scheduling(unittest.TestCase):
         self.assertTrue(any("no longer exists" in p for p in sch.validate_schedule(make(), None, NOW)))
 
     def test_limits_on_rows(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             make(items=[{}] * (sch.MAX_ITEMS + 1))
 
     def test_ids(self):

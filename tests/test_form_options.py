@@ -1,7 +1,8 @@
 """Checkboxes and radio buttons the page listing can't show.
 Unit tests always run; the real-Chromium test is opt-in:  RUN_BROWSER_TESTS=1 python -m unittest test_form_options -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
 import asyncio

@@ -1,6 +1,7 @@
 """App-level tests for schedules: the endpoints, the inbox, and how a scheduled run is handed to the browser.
 No browser: the player is replaced."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio
@@ -232,7 +233,7 @@ class Endpoints(Base):
         self.assertIn("already running", r.json()["reason"])
 
     def test_delete_and_a_deleted_playbook_takes_its_schedules(self):
-        s = self.create()
+        self.create()
         other = self.pbs.save(profile_pb("Other"), approve=True)
         s2 = self.create(playbook_id=other.id, name="other")
         self.assertEqual(self.c.delete(f"/schedules/{s2['id']}").json(), {"ok": True, "deleted": True})

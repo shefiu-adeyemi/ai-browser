@@ -1,6 +1,7 @@
 """Tests for batch_check.py (the dry run), results_export.combined_table and their endpoints."""
 
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import pathlib

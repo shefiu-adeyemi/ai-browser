@@ -1,5 +1,6 @@
 """Unit tests (no browser) for the lifecycle review fixes."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio

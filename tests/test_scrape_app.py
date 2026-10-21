@@ -1,6 +1,7 @@
 """The scrape preview endpoint and a scrape playbook through the real HTTP API."""
 
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import json
@@ -132,7 +133,7 @@ class SavedThroughTheApi(unittest.TestCase):
         rec = {"run_id": "run_" + "a" * 12, "started_at": 1.0, "status": "done", "attended": True, "inputs": {},
                "outputs": [{"step_id": "s2", "text": "1 row read",
                             "table": {"columns": ["Name"], "rows": [["Ann"]], "truncated": False}}], "error": ""}
-        with mock.patch.object(agent_ui, "_runs", type(runs)(pathlib.Path(tempfile.mkdtemp()))) as store:
+        with mock.patch.object(agent_ui, "_runs", type(runs)(pathlib.Path(tempfile.mkdtemp()))):
             agent_ui._runs.save(saved["id"], rec)
             csv_body = self.client.get(f"/playbooks/{saved['id']}/results.csv").content.decode("utf-8-sig")
             self.assertIn("Name", csv_body.splitlines()[0])

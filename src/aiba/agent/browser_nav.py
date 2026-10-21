@@ -13,7 +13,7 @@ Rules:
 
 import os
 import re
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Callable
 from urllib.parse import quote_plus, urlsplit
 
 MAX_URL = 2048

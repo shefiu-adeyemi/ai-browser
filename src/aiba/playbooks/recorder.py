@@ -20,8 +20,8 @@ without a browser.
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
-from urllib.parse import quote_plus, urlparse, urlunparse
+from typing import Any, Optional
+from urllib.parse import urlparse, urlunparse
 
 from pydantic import ValidationError
 
@@ -203,7 +203,6 @@ def _steps_from_action(name: str, p: dict, fp: Optional[Fingerprint], goal: str,
                      note=note_goal or "Read information from the page")], notes
 
     if name in ("click", "input", "select_dropdown"):
-        what = {"click": "Click", "input": "Type into", "select_dropdown": "Choose an option in"}[name]
         if fp is None:
             # browser-use only has no element for an index that was NOT on the page, i.e. the action
             # did not do anything. (Its result carries no error for this, only a message.)

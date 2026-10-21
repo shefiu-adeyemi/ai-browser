@@ -1,6 +1,5 @@
 """Unit tests for chat_store.ChatStore (plain files in a temp folder; no browser, no app)."""
 import json
-import os
 import pathlib
 import tempfile
 import threading

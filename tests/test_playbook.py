@@ -4,6 +4,7 @@ import unittest
 
 from aiba.playbooks import model as pbk
 from aiba.playbooks.model import Check, Fingerprint, Playbook, ScrapeField, Step, Variable
+from pydantic import ValidationError
 
 
 def linkedin_playbook(**over) -> Playbook:
@@ -27,11 +28,11 @@ class Validation(unittest.TestCase):
         self.assertTrue(any("no steps" in p for p in probs))
 
     def test_unknown_field_is_rejected(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="open", url="https://a.com", run_this="rm -rf")
 
     def test_unknown_kind_is_rejected(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="repeat")
 
     def test_open_needs_http_url(self):
@@ -130,7 +131,7 @@ class NewKinds(unittest.TestCase):
     def test_a_search_step_needs_a_query_and_an_engine(self):
         self.assertTrue(pbk.validate(self.ok(Step(id="s1", kind="search", engine="google"))))
         self.assertTrue(any("engine" in p for p in pbk.validate(self.ok(Step(id="s1", kind="search", query="x")))))
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="search", engine="altavista", query="x")
 
     def test_a_search_query_can_be_a_variable_and_cannot_change_the_site(self):
@@ -154,9 +155,9 @@ class NewKinds(unittest.TestCase):
         self.assertEqual(pbk.validate(self.ok(Step(id="s1", kind="tab", tab_index=1))), [])
         self.assertEqual(pbk.validate(self.ok(Step(id="s1", kind="tab", tab_index=0, close_tab=True))), [])
         self.assertTrue(pbk.validate(self.ok(Step(id="s1", kind="tab"))))
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="tab", tab_index=-1)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="tab", tab_index=99)
 
     def test_a_handoff_step(self):
@@ -165,7 +166,7 @@ class NewKinds(unittest.TestCase):
         self.assertTrue(pbk.validate(self.ok(Step(id="s1", kind="handoff", message="   "))))
         self.assertTrue(pbk.validate(self.ok(Step(id="s1", kind="handoff", message="Type {{x}}"))))
         self.assertTrue(pbk.validate(self.ok(Step(id="s1", kind="handoff", message="use <secret>pw</secret>"))))
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="handoff", message="x" * 501)
 
     def test_none_of_them_need_a_model(self):
@@ -215,7 +216,7 @@ class ApproveStep(unittest.TestCase):
 
     def test_the_wait_is_bounded(self):
         for bad in (0, 4, 7 * 24 * 60 + 1, -5):
-            with self.assertRaises(Exception):
+            with self.assertRaises(ValidationError):
                 Step(id="s1", kind="approve", message="m", timeout_minutes=bad)
         self.assertEqual(Step(id="s1", kind="approve", message="m").timeout_minutes, None)     # the default is applied at run time
         self.assertEqual(pbk.DEFAULT_APPROVAL_MINUTES, 1440)
@@ -252,7 +253,8 @@ class ApprovalsSurviveNewFeatures(unittest.TestCase):
     LATE = ("timeout_minutes", "on_timeout", "variable", "fields", "row_selector", "max_rows", "source", "column", "body", "on_failure")
 
     def legacy(self, pb):
-        import hashlib, json
+        import hashlib
+        import json
         steps = [{k: v for k, v in s.model_dump(mode="json", exclude={"note", "tier"}).items() if k not in self.LATE} for s in pb.steps]
         body = {"steps": steps, "variables": [{"name": v.name, "type": v.type, "allowed_hosts": sorted(v.allowed_hosts)} for v in pb.variables],
                 "domains": pbk.compute_domains(pb)}
@@ -372,7 +374,7 @@ class InputStep(unittest.TestCase):
         for bad in (Step(id="s1", kind="back", on_timeout="skip"),
                     Step(id="s1", kind="input", message="m", variable="code", on_timeout="skip")):
             self.assertTrue(pbk.validate(self.pb(bad, Step(id="s2", kind="back"))), bad.kind)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="approve", message="m", on_timeout="go ahead")             # silence is never a yes
 
     def test_the_choices_are_part_of_the_approval(self):
@@ -406,7 +408,7 @@ class HashesAreText(unittest.TestCase):
         self.assertEqual((fp.element_hash, fp.stable_hash), (None, None))
 
     def test_oversized_hash_text_is_refused(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Fingerprint(element_hash="1" * 41)
 
 
@@ -471,13 +473,13 @@ class SiteNames(unittest.TestCase):
 
 class Sizes(unittest.TestCase):
     def test_oversized_fields_are_refused(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Variable(name="a", label="x" * 101)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Fingerprint(x_path="x" * 2001)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Check(hosts=["a.com"] * 21)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Playbook(name="x", variables=[Variable(name=f"v{i}") for i in range(pbk.MAX_VARIABLES + 1)])
 
     def test_big_element_description_is_refused(self):

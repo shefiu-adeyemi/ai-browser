@@ -146,6 +146,18 @@ _init_sessions()
 _ui_feed = UIFeed()     # allowlist + secret redaction + line cap (see ui_feed.py)
 
 
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """asyncio.create_task that keeps a reference until the task is done. The event loop only holds tasks weakly,
+    so a fire-and-forget task nobody refers to can be garbage-collected before it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 class _WSLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -153,7 +165,7 @@ class _WSLogHandler(logging.Handler):
             if msg is None:
                 return
             loop = asyncio.get_running_loop()
-            loop.call_soon_threadsafe(lambda: asyncio.create_task(_broadcast(msg)))
+            loop.call_soon_threadsafe(lambda: _spawn(_broadcast(msg)))
         except RuntimeError:
             pass
 
@@ -212,7 +224,7 @@ def _offer_frame(ws, msg: dict) -> None:
         finally:
             _frame_inflight.pop(ws, None)
             _frame_waiting.pop(ws, None)
-    asyncio.create_task(pump(msg))
+    _spawn(pump(msg))
 
 
 async def _broadcast(msg: dict) -> None:
@@ -231,7 +243,7 @@ async def _broadcast(msg: dict) -> None:
     dropped = {ws for ws, ok in zip(clients, results) if not ok}
     _clients.difference_update(dropped)
     for ws in dropped:       # hang up, or the page would sit there "connected" but frozen
-        asyncio.create_task(_hang_up(ws))
+        _spawn(_hang_up(ws))
 
 _broker = ApprovalBroker(_broadcast, lambda: bool(_clients))
 
@@ -840,7 +852,7 @@ async def _startup() -> None:
     _session = _make_session()
     _live = LiveView(lambda: _session, _broadcast, lambda: bool(_clients), _save_last_url)
     _live_task = asyncio.create_task(_live.run())
-    asyncio.create_task(_open_start_page())
+    _spawn(_open_start_page())
     global _scheduler_task
     if os.getenv("AIBA_NO_SCHEDULER", "").strip() not in ("1", "true", "yes"):
         _scheduler_task = asyncio.create_task(_scheduler.run_forever())
@@ -1351,7 +1363,8 @@ async def _build_player(pb: pbk.Playbook, attended: bool, trim: bool = True) -> 
             if model_tiers.read_slots()["standard"].usable:   # no key at all: no model, so the step says so plainly
                 llm = _router.escalating("playbook_extract")  # a cheap model first, a stronger one if it fails
                 # a step the user pinned to a tier gets exactly that tier (its model comes from Settings at run time)
-                llm_for = lambda tier: _router.escalating("playbook_extract", tier=tier)
+                def llm_for(tier):
+                    return _router.escalating("playbook_extract", tier=tier)
         except Exception as e:                  # the step then fails with a clear message
             _log.warning("no model for a playbook extract step: %s", e)
 
@@ -1417,7 +1430,8 @@ async def run_playbook_task(pb: pbk.Playbook, values: dict, run_id: str) -> None
     record = {"run_id": run_id, "playbook_version": pb.version, "started_at": started.timestamp(),
               "attended": True, "inputs": values, "status": "failed", "error": "", "steps": [],
               "outputs": [], "seconds": 0.0, "finished_at": 0.0}
-    finish_record = lambda status, error, result=None: _save_run_record(pb, record, status, error, result)
+    def finish_record(status, error, result=None):
+        return _save_run_record(pb, record, status, error, result)
 
     try:
         await _broadcast({"type": "status", "text": "running"})

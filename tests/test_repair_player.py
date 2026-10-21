@@ -4,8 +4,8 @@ import unittest
 
 from aiba.playbooks import model as pbk
 from aiba.playbooks import repair as pr
-from aiba.playbooks.model import Playbook, ScrapeField, Step, Variable
-from test_foreach import LIST, DETAIL, loop_pb
+from aiba.playbooks.model import Playbook, ScrapeField
+from test_foreach import LIST, loop_pb
 from test_playbook_player import PlayerCase, S, el, fp
 
 
@@ -47,7 +47,7 @@ class Elements(PlayerCase):
 
     async def test_nothing_is_repaired_unless_the_playbook_says_so(self):
         rep = FakeRepairer(pick=11)
-        page = self.setup_page([el(11, "Send msg")], rep)
+        self.setup_page([el(11, "Send msg")], rep)
         r = await self.run_pb(rpb([S(1, "open", url="https://a.com/"), S(2, "click", target=MISSING)], repair=False))
         self.assertEqual(r.status, "failed")
         self.assertIn("Couldn't find", r.steps[1].detail)
@@ -55,7 +55,7 @@ class Elements(PlayerCase):
         self.assertEqual(r.repairs, [])
 
     async def test_nothing_is_repaired_without_a_repairer(self):
-        page = self.build([el(11, "Send msg")])
+        self.build([el(11, "Send msg")])
         r = await self.run_pb(self.pb())
         self.assertEqual(r.status, "failed")
 
@@ -76,7 +76,7 @@ class Elements(PlayerCase):
 
     async def test_the_model_only_sees_close_compatible_elements_from_this_page(self):
         rep = FakeRepairer(pick=12)
-        page = self.setup_page([el(11, "Unrelated"), el(12, "Send message now"), el(13, "Send message", node="div")], rep,
+        self.setup_page([el(11, "Unrelated"), el(12, "Send message now"), el(13, "Send message", node="div")], rep,
                                url="https://a.com/")
         await self.run_pb(self.pb())
         (step_id, offered, host), = rep.chosen
@@ -84,7 +84,7 @@ class Elements(PlayerCase):
 
     async def test_when_the_model_picks_nothing_the_step_fails_as_it_always_did(self):
         rep = FakeRepairer(pick=None)
-        page = self.setup_page([el(12, "Send message now")], rep)
+        self.setup_page([el(12, "Send message now")], rep)
         r = await self.run_pb(self.pb())
         self.assertEqual(r.status, "failed")
         self.assertIn("Couldn't find", r.steps[1].detail)
@@ -92,14 +92,14 @@ class Elements(PlayerCase):
 
     async def test_a_step_that_sends_is_never_repaired(self):
         rep = FakeRepairer(pick=12)
-        page = self.setup_page([el(12, "Send message now")], rep)
+        self.setup_page([el(12, "Send message now")], rep)
         r = await self.run_pb(self.pb(ask=True))
         self.assertEqual(r.status, "failed")
         self.assertEqual(rep.chosen, [])
 
     async def test_typing_a_stored_secret_is_never_repaired(self):
         rep = FakeRepairer(pick=12)
-        page = self.setup_page([el(12, "Pass word", node="input")], rep)
+        self.setup_page([el(12, "Pass word", node="input")], rep)
         pb = rpb([S(1, "open", url="https://a.com/"), S(2, "type", target=fp("Password", node="input", attrs={"id": "pw"}), text="<secret>pw</secret>")])
         r = await self.run_pb(pb)
         self.assertEqual(rep.chosen, [])
@@ -116,7 +116,7 @@ class Elements(PlayerCase):
     async def test_only_so_many_repairs_per_run(self):
         steps = [S(1, "open", url="https://a.com/")] + [S(n, "click", target=fp(f"Gone {n}", h=f"x{n}", sh=f"y{n}")) for n in range(2, 7)]
         rep = FakeRepairer(pick=1)
-        page = self.setup_page([el(1, "Gone 2 gone 3 gone 4 gone 5 gone 6")], rep)
+        self.setup_page([el(1, "Gone 2 gone 3 gone 4 gone 5 gone 6")], rep)
         self.player.find_timeout = 1
         await self.run_pb(rpb(steps))
         self.assertLessEqual(len(rep.chosen), pr.MAX_REPAIRS)
@@ -124,7 +124,7 @@ class Elements(PlayerCase):
     async def test_exactly_three_repairs_are_made_and_the_fourth_step_stops_the_run(self):
         steps = [S(1, "open", url="https://a.com/")] + [S(n, "click", target=fp(f"Gone {n}", h=f"x{n}", sh=f"y{n}")) for n in range(2, 7)]
         rep = FakeRepairer(chooser=lambda step, options: options[0].index)
-        page = self.setup_page([el(n, f"Gone {n} now") for n in range(2, 7)], rep)
+        self.setup_page([el(n, f"Gone {n} now") for n in range(2, 7)], rep)
         self.player.find_timeout = 1
         r = await self.run_pb(rpb(steps))
         self.assertEqual(len(rep.chosen), pr.MAX_REPAIRS)
@@ -149,7 +149,7 @@ class Elements(PlayerCase):
 
     async def test_a_found_element_is_never_repaired(self):
         rep = FakeRepairer(pick=12)
-        page = self.setup_page([el(5, "Send message", h="old1", sh="old2", attrs={"aria-label": "Send message"}), el(12, "Other")], rep)
+        self.setup_page([el(5, "Send message", h="old1", sh="old2", attrs={"aria-label": "Send message"}), el(12, "Other")], rep)
         r = await self.run_pb(self.pb())
         self.assertEqual(r.status, "done")
         self.assertEqual((rep.chosen, r.repairs), ([], []))
@@ -164,7 +164,7 @@ class Elements(PlayerCase):
 
     async def test_a_second_run_starts_with_a_fresh_allowance(self):
         rep = FakeRepairer(pick=12)
-        page = self.setup_page([el(12, "Send message now")], rep)
+        self.setup_page([el(12, "Send message now")], rep)
         for _ in range(2):
             r = await self.run_pb(self.pb())
             self.assertEqual(len(r.repairs), 1)

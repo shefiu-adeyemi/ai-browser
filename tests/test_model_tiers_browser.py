@@ -5,7 +5,8 @@ Strong model. Also: a cheap Fast model reads the page, and an invisible tier set
 
 Opt-in (launches a browser):  RUN_BROWSER_TESTS=1 python -m unittest test_model_tiers_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import os

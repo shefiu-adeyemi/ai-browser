@@ -1,7 +1,8 @@
 """Real-Chromium test of the browser toolbar (address, back / forward / reload, tabs).  Slow, so opt-in:
     RUN_BROWSER_TESTS=1 python -m unittest test_browser_nav_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
 import asyncio

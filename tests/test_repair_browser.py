@@ -3,7 +3,8 @@ Self-repair in a REAL Chromium, through the real runner: a page that changes aft
 
 Opt-in (launches a browser):  RUN_BROWSER_TESTS=1 python -m unittest test_repair_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio
@@ -122,7 +123,7 @@ class RepairingInABrowser(ScrapeBase):
     async def test_the_playbook_is_not_changed_by_a_repair_until_the_user_says_so(self):
         pb = await self.saved(repair=True)
         PAGES["/shop"] = AFTER
-        rec = await self.replay(pb)
+        await self.replay(pb)
         same = self.pbs.get(pb.id)
         self.assertEqual((same.version, same.steps[1].target.ax_name), (1, "Show results"))
         self.assertTrue(pbk.is_approved(same))

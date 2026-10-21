@@ -1,7 +1,8 @@
 """DeepSeek's most common slip (sending one action's arguments without the wrapper) is put right.
 The shapes below are the real ones from a failed LinkedIn run (agent_error.log).  No browser, no network.
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
 import json
@@ -13,6 +14,7 @@ from browser_use.agent.views import AgentOutput
 
 from aiba.llm import deepseek as deepseek_chat
 from aiba.agent.action_guard import GuardedTools
+from pydantic import ValidationError
 
 _ACTIONS = GuardedTools(approver=None).registry.create_action_model()
 CAREFUL = AgentOutput.type_with_custom_actions(_ACTIONS)
@@ -59,7 +61,7 @@ class DoesNotGuess(unittest.TestCase):
     def test_arguments_no_action_takes_are_left_to_fail(self):
         sent = {"url": "https://example.com", "colour": "red"}
         self.assertEqual(deepseek_chat.repair_output(sent, CAREFUL), sent)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             CAREFUL.model_validate(deepseek_chat.repair_output(sent, CAREFUL))
 
     def test_missing_a_required_argument_is_left_to_fail(self):

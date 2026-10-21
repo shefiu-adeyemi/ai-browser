@@ -1,7 +1,8 @@
 """Real-Chromium test: the guard reads real DOM elements and really stops/allows actions.
 Opt-in (launches a browser):  RUN_BROWSER_TESTS=1 python -m unittest test_action_guard_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio
@@ -152,7 +153,7 @@ class AgentBrowserCannotReachControlUi(unittest.IsolatedAsyncioTestCase):
             for host in ("127.0.0.1", "localhost"):
                 self.assertEqual(await page.evaluate(f"() => ({probe})('http://{host}:{p_dev}/')"), "REACHED", host)
                 self.assertEqual(await page.evaluate(f"() => ({probe})('http://{host}:{p_own}/')"), "BLOCKED", host)
-            with self.assertRaises(Exception):                            # top-level navigation too
+            with self.assertRaises(Exception):  # noqa: B017 (browser-use's own error type; any failure means blocked)                            # top-level navigation too
                 await s.navigate_to(f"http://localhost:{p_own}/")
         finally:
             await s.kill()

@@ -64,7 +64,8 @@ def watch_problems(w: Watch) -> list[str]:
 
 def fingerprint(w: Watch) -> str:
     """Changes when the settings change in a way that makes an old snapshot not comparable."""
-    import hashlib, json
+    import hashlib
+    import json
     body = {"k": [k.lower() for k in w.key_columns], "i": sorted(c.lower() for c in w.ignore_columns), "p": w.ignore_patterns,
             "m": w.min_change_percent}
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]

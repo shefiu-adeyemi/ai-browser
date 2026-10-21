@@ -4,7 +4,8 @@ start, finish, stop, fail, hit the step limit, continue, double-submit, shut dow
 
 Opt-in (launches a browser):  RUN_BROWSER_TESTS=1 python -m unittest test_lifecycle_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio

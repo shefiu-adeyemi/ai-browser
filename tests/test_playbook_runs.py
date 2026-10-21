@@ -1,6 +1,5 @@
 """Tests for playbook_runs.py."""
 
-import json
 import os
 import tempfile
 import time

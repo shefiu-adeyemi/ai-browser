@@ -127,7 +127,7 @@ class Queueing(unittest.IsolatedAsyncioTestCase):
 
     async def test_queue_is_bounded(self):
         lv = make()
-        for i in range(1000):
+        for _ in range(1000):
             lv.enqueue_input({"kind": "key", "event": "keyUp", "key": "a"})
         self.assertLessEqual(len(lv._inputs), 256)
 

@@ -1,6 +1,7 @@
 """How the agent is set up for each model: does it use screenshots, and is the end-of-run check on? No browser,
 no model: browser-use's Agent is replaced by a recorder, so this only tests OUR decision."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
 import unittest

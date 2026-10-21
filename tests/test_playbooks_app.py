@@ -1,5 +1,6 @@
 """App-level tests for the playbook endpoints. No browser: the finished run is a look-alike."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import pathlib
@@ -8,7 +9,6 @@ from types import SimpleNamespace as NS
 from unittest import mock
 
 from aiba.server import main as agent_ui
-from aiba.playbooks import model as pbk
 from aiba.storage.chat_store import ChatStore
 from aiba.playbooks.runs import RunStore
 from aiba.playbooks.store import PlaybookStore
@@ -231,7 +231,6 @@ class PlaybookApi(unittest.TestCase):
 
     def test_a_template_cannot_be_run_before_it_is_approved_for_a_schedule(self):
         pid = self.c.post("/playbooks/from-template", json={"id": "web_search"}).json()["playbook"]["id"]
-        from aiba.scheduling.store import ScheduleStore
         body = {"schedule": {"name": "x", "playbook_id": pid, "items": [{"term": "cats"}], "cadence": {"kind": "daily", "at": "09:00"}}}
         self.assertEqual(self.c.post("/schedules", json=body).status_code, 400)
 

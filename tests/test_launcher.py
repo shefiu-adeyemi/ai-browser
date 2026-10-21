@@ -237,7 +237,8 @@ class OldInstance(unittest.TestCase):
 
 class PortSetting(unittest.TestCase):
     def test_the_launcher_and_the_app_read_the_same_port_setting(self):
-        import subprocess, sys
+        import subprocess
+        import sys
         code = "import launcher; print(launcher.PORT)"
         for value, expected in (("", "8000"), ("8123", "8123")):
             env = {**__import__("os").environ, "AIBA_PORT": value} if value else {k: v for k, v in __import__("os").environ.items() if k != "AIBA_PORT"}

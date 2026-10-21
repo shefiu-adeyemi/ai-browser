@@ -9,6 +9,7 @@ from aiba.playbooks import model as pbk
 from aiba.playbooks import repair as pr
 from aiba.playbooks.model import Fingerprint, Playbook, ScrapeField, Step
 from aiba.playbooks.match import Candidate
+from pydantic import ValidationError
 
 
 def cand(i, ax="Go", node="button", attrs=None, h=None):
@@ -151,9 +152,9 @@ class Choosing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.calls, [])
 
     async def test_the_choice_schema_cannot_hold_more_than_the_list(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             pr.Choice(number=pr.SHORTLIST + 1)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             pr.Choice(number=0)
 
 
@@ -211,7 +212,6 @@ class Selectors(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.repairer(partial).selectors(scrape_step(), "https://a.com/"))
 
     async def test_a_column_the_page_does_not_have_a_value_for_means_it_is_not_the_same_table(self):
-        from aiba.playbooks import suggest as ps
         two = self.sug()
         rep = self.repairer(two, rows=[["Ann", None], ["Bob", None]])        # the Price selector finds nothing in any row
         self.assertIsNone(await rep.selectors(scrape_step(), "https://a.com/"))

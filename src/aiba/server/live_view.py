@@ -48,6 +48,7 @@ class LiveView:
         has_clients: Callable[[], bool],
         on_url: Optional[Callable[[str], None]] = None,
     ) -> None:
+        self._acks: set[asyncio.Task] = set()
         self._get_session = get_session
         self._broadcast   = broadcast
         self._has_clients = has_clients
@@ -81,7 +82,9 @@ class LiveView:
         self._frame_ready.set()
         # Ack right away so Chromium keeps producing frames; the sender below
         # forwards only the newest one, so a slow client can't back frames up.
-        asyncio.get_running_loop().create_task(self._ack(event.get("sessionId"), session_id))
+        task = asyncio.get_running_loop().create_task(self._ack(event.get("sessionId"), session_id))
+        self._acks.add(task)                    # keep a reference until it is done (the loop holds tasks weakly)
+        task.add_done_callback(self._acks.discard)
 
     async def _ack(self, frame_no: Any, sid: Optional[str]) -> None:
         try:

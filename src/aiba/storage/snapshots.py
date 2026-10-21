@@ -86,7 +86,8 @@ class SnapshotStore:
         with self._lock:
             for f in folder.glob("*.json") if folder.is_dir() else []:
                 try:
-                    f.unlink(); n += 1
+                    f.unlink()
+                    n += 1
                 except OSError:
                     pass
             try:

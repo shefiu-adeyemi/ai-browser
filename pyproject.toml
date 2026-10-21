@@ -18,3 +18,19 @@ dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 130
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Real problems, not style: syntax and import errors, unused or undefined names (F), likely bugs (B),
+# and fire-and-forget tasks that can be garbage-collected (RUF006).
+select = ["E4", "E7", "E9", "F", "B", "RUF006"]
+ignore = ["B905"]        # zip(strict=...) would only add noise: every zip here pairs lists built together
+
+[tool.ruff.lint.per-file-ignores]
+# The tests start with a compact bootstrap (set AIBA_DATA_DIR, then import the app) and use small
+# one-line lambdas as fakes; neither is worth rewriting.
+"tests/*" = ["E702", "E731", "E402"]

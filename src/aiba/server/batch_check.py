@@ -18,7 +18,9 @@ SHOW = 3
 
 def _plain(step: pbk.Step, values: dict[str, str]) -> str:
     """One step in words, with this row's values filled in. A secret placeholder stays a placeholder."""
-    r = lambda t: pbk.render(t, values) or ""
+    def r(t):
+        return pbk.render(t, values) or ""
+
     k = step.kind
     if k == "open":
         return f"Open {r(step.url)}"

@@ -149,5 +149,23 @@ class Shell(unittest.IsolatedAsyncioTestCase):
         self.assertIn("npm run build", r.text)
 
 
+class BackgroundTasks(unittest.IsolatedAsyncioTestCase):
+    """Fire-and-forget tasks are held until they finish: the event loop only keeps weak references to tasks."""
+
+    async def test_a_spawned_task_is_held_until_it_is_done(self):
+        gate = asyncio.Event()
+
+        async def work():
+            await gate.wait()
+            return "done"
+
+        task = agent_ui._spawn(work())
+        self.assertIn(task, agent_ui._background_tasks)
+        gate.set()
+        self.assertEqual(await task, "done")
+        await asyncio.sleep(0)
+        self.assertNotIn(task, agent_ui._background_tasks)
+
+
 if __name__ == "__main__":
     unittest.main()

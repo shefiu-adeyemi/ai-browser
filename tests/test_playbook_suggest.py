@@ -1,6 +1,7 @@
 """Tests for playbook_suggest.py (what the model sees, what it may answer, and how its answer is checked) and its endpoint."""
 
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import json

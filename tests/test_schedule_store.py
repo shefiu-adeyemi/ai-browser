@@ -80,7 +80,7 @@ class Store(unittest.TestCase):
         self.assertEqual(self.store.all(), [])
 
     def test_delete_and_delete_for_playbook(self):
-        a, b = self.store.save(make("a")), self.store.save(make("b").model_copy(update={"playbook_id": "pb_" + "b" * 12}))
+        _a, b = self.store.save(make("a")), self.store.save(make("b").model_copy(update={"playbook_id": "pb_" + "b" * 12}))
         self.assertEqual(self.store.delete_for_playbook(PID), 1)
         self.assertEqual([s.id for s in self.store.all()], [b.id])
         self.assertTrue(self.store.delete(b.id))
@@ -141,7 +141,7 @@ class Store(unittest.TestCase):
 
     def test_concurrent_saves_lose_nothing(self):
         def work():
-            for i in range(5):
+            for _ in range(5):
                 self.store.save(make("x"))
         threads = [threading.Thread(target=work) for _ in range(4)]
         [t.start() for t in threads]

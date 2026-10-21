@@ -1,6 +1,7 @@
 """Tests for playbook_picker.py: what is accepted from the page (untrusted) and how the endpoints behave."""
 
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import json

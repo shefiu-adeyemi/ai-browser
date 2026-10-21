@@ -1,13 +1,12 @@
 """The "for each row" step: the format rules and how the player runs a loop over a scraped column."""
 
-import asyncio
 import unittest
 
 from aiba.playbooks import model as pbk
 from aiba.playbooks import scrape as ps
 from aiba.playbooks.model import Playbook, ScrapeField, Step, Variable
 from aiba.playbooks.player import summarize
-from test_playbook_player import PlayerCase, S, el, fp, make_pb
+from test_playbook_player import PlayerCase, S, fp, make_pb
 
 LIST = {"total": 3, "rows": [["Ann", "https://a.com/p/1"], ["Bob", "https://a.com/p/2"], ["Cy", "https://a.com/p/3"]]}
 DETAIL = {"total": 1, "rows": [["Engineer"]]}
@@ -96,7 +95,7 @@ class Format(unittest.TestCase):
     def test_the_loop_value_exists_only_inside_the_loop(self):
         after = S(6, "open", url="{{item}}")
         self.assertTrue(any("only exists inside its loop" in p for p in self.problems(loop_pb(body=2, extra=[after]))))
-        before = [S(0, "search", engine="duckduckgo", query="{{item}}")]
+        [S(0, "search", engine="duckduckgo", query="{{item}}")]
         pb = loop_pb()
         early = pb.model_copy(update={"steps": [*[S(0, "search", engine="duckduckgo", query="{{item}}")], *pb.steps]})
         self.assertTrue(any("only exists inside its loop" in p for p in self.problems(early)))
@@ -295,7 +294,7 @@ class Running(PlayerCase):
         self.assertEqual(self.opened(page)[1:], ["https://duckduckgo.com/?q=red+shoes", "https://duckduckgo.com/?q=blue+socks"])
 
     async def test_a_number_loop_variable_checks_each_value(self):
-        page = self.serve([{"total": 3, "rows": [["12", "x"], ["many", "y"], ["7", "z"]]}])
+        self.serve([{"total": 3, "rows": [["12", "x"], ["many", "y"], ["7", "z"]]}])
         steps = [S(1, "open", url="https://a.com/list"),
                  S(2, "scrape", row_selector="tr", fields=[ScrapeField(name="Count", selector=".n", type="text"), ScrapeField(name="L", selector="a", type="link")]),
                  S(3, "foreach", source="s2", column="Count", variable="n", body=1),

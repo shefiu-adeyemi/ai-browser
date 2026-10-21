@@ -1,12 +1,10 @@
 """Watching for changes end to end: a scheduled run is compared with the last one, recorded, and announced once."""
 
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio
-import pathlib
-import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -221,7 +219,7 @@ class WatchFlow(Base, unittest.IsolatedAsyncioTestCase):
         self.assertIn('Stopped: "Price watch"', titles)
 
     async def test_an_ordinary_batch_still_says_it_finished(self):
-        s = self.make(items=[{"page": "a"}, {"page": "b"}], watch=Watch(enabled=False))
+        self.make(items=[{"page": "a"}, {"page": "b"}], watch=Watch(enabled=False))
         self.reads["*"] = done(table_out([["Ann", "5"]]))
         for _ in range(3):
             await self.real.tick()

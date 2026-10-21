@@ -4,7 +4,8 @@ turned into a playbook, saved, then REPLAYED with a different input and no model
 
 Opt-in (launches a browser):  RUN_BROWSER_TESTS=1 python -m unittest test_playbook_player_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio

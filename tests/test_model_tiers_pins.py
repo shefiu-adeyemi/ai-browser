@@ -3,7 +3,8 @@
 The choice is a TIER (Fast / Standard / Strong), never a model name, so the models behind the tiers can be changed
 in Settings at any time and every saved playbook follows. A chosen tier is used exactly: no climbing on failure.
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio

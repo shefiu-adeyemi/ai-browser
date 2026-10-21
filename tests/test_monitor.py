@@ -3,6 +3,7 @@
 import unittest
 
 from aiba.scheduling.monitor import Diff, Watch, compare, counts, fingerprint, summarize, tables_of, to_record, watch_problems
+from pydantic import ValidationError
 
 
 def table(rows, columns=("Name", "Price"), tid="s2", truncated=False):
@@ -35,11 +36,11 @@ class Settings(unittest.TestCase):
         self.assertTrue(watch_problems(W(ignore_patterns=["("])))                   # not valid
         self.assertTrue(watch_problems(W(ignore_patterns=[""])))
         self.assertTrue(watch_problems(W(ignore_patterns=["x" * 101])))
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Watch(ignore_patterns=["a"] * 6)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Watch(min_change_percent=101)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Watch(min_change_percent=-1)
 
     def test_a_column_cannot_be_both_key_and_left_out(self):

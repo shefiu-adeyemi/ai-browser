@@ -1,6 +1,7 @@
 """App-level tests for running playbooks: the endpoints, and the chat/record handling of a run.
 No browser: the player and the browser session are replaced."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio
@@ -9,7 +10,6 @@ import unittest
 from unittest import mock
 
 from aiba.server import main as agent_ui
-from aiba.playbooks import model as pbk
 from aiba.storage.chat_store import ChatStore
 from aiba.playbooks.model import Check, Playbook, Step, Variable
 from aiba.playbooks.player import RunResult, StepResult

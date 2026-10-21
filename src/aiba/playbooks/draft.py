@@ -21,7 +21,6 @@ import asyncio
 import re
 from difflib import SequenceMatcher
 from typing import Any, Callable, Literal, Optional
-from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -309,7 +308,6 @@ async def draft(description: str, *, llm: Any, player: Any, page: Callable[[], A
                            **({"sample": sample} if sample else {})})
 
     for i, s in enumerate(plan.steps, start=1):
-        label = s.note or s.label or s.kind
         if stopped:
             add(s.kind, _describe(s), "left_out", stopped)
             continue

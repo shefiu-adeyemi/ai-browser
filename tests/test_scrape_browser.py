@@ -3,7 +3,8 @@ Reading a table off real pages in a REAL Chromium, through the real runner. No m
 
 Opt-in (launches a browser):  RUN_BROWSER_TESTS=1 python -m unittest test_scrape_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import http.server
@@ -471,7 +472,8 @@ class ForEachInBrowser(ScrapeBase):
         self.assertIn("row 3 of 3", rec["error"])
 
     async def test_the_combined_results_have_one_line_per_person(self):
-        import csv, io
+        import csv
+        import io
         from aiba.server.results_export import runs_to_csv
         saved, rec = await self.run_loop(on_failure="skip")
         rows = list(csv.reader(io.StringIO(runs_to_csv([rec]))))

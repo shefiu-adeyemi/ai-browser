@@ -1,5 +1,6 @@
 """A Stop must not throw the work away: the chat gets what the run had found so far. No browser, no model."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
 import unittest

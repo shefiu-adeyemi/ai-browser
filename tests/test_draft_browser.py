@@ -4,14 +4,13 @@ model is not needed to test everything around it), and the drafts it produces ar
 
 Opt-in (launches a browser):  RUN_BROWSER_TESTS=1 python -m unittest test_draft_browser -v
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
-import asyncio
 import os
 import unittest
 from types import SimpleNamespace as NS
-from unittest import mock
 
 from aiba.server import main as agent_ui
 from aiba.playbooks import model as pbk

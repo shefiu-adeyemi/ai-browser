@@ -233,7 +233,7 @@ class Refusals(PlayerCase):
         self.assertTrue(r.steps[1].fatal)
 
     async def test_a_literal_open_outside_the_recomputed_sites_cannot_happen(self):
-        page = self.build()
+        self.build()
         r = await self.run_pb(make_pb([S(1, "open", url="https://a.com/")]))
         self.assertEqual(r.status, "done")
 
@@ -295,14 +295,14 @@ class Finding(PlayerCase):
         self.assertEqual([a[0] for a in page.actions], ["navigate"])
 
     async def test_a_miss_says_where_it_is_and_what_looks_closest(self):
-        page = self.build([el(1, "Messaging", h=9), el(2, "Home", h=8)], url="https://a.com/profile")
+        self.build([el(1, "Messaging", h=9), el(2, "Home", h=8)], url="https://a.com/profile")
         r = await self.run_pb(make_pb([S(1, "click", target=fp("Message", h=1))]))
         self.assertEqual(r.status, "failed")
         self.assertIn("Couldn't find Message on the page.", r.error)
         self.assertIn("The page is a.com. The closest elements on it: \"Messaging\".", r.error)
 
     async def test_a_miss_on_a_page_with_nothing_alike_says_to_check_the_page(self):
-        page = self.build([el(1, "Totally different", h=9)], url="https://b.com/")
+        self.build([el(1, "Totally different", h=9)], url="https://b.com/")
         r = await self.run_pb(make_pb([S(1, "click", target=fp("Message", h=1))]))
         self.assertIn("nothing on it looks like that element", r.error)
         self.assertIn("b.com", r.error)
@@ -380,7 +380,7 @@ class Approvals(PlayerCase):
         page.risky[4] = "Click Delete?"
         pb = make_pb([S(1, "open", url="https://a.com/"),
                       S(2, "click", target=fp("Delete account", h=99, sh=99))], approve=True)   # NOT flagged ask
-        r = await self.run_pb(pb)
+        await self.run_pb(pb)
         self.assertEqual(self.inner.asked, [("approve", "Click Delete?")])      # asked: not pre-approved
 
     async def test_an_unapproved_playbook_asks_the_user(self):
@@ -552,7 +552,7 @@ class Checkpoints(PlayerCase):
         self.assertNotIn(("click", {"index": 4}), page.actions)
 
     async def test_it_works_for_a_playbook_that_was_never_approved(self):
-        page = self.page()
+        self.page()
         r = await self.run_pb(self.send_pb(approve=False), {"who": "Jane"})
         self.assertEqual(r.status, "done", r.error)
         self.assertEqual(self.inner.asked, [("approve", "Send to Jane?")])          # the yes covers the click too
@@ -664,11 +664,11 @@ class Checkpoints(PlayerCase):
 
     async def test_only_the_steps_named_are_skipped(self):
         page = self.two_sends_page()
-        r = await self.player.run(self.two_sends(), approved={"s3"}, done={"s99"})
+        await self.player.run(self.two_sends(), approved={"s3"}, done={"s99"})
         self.assertEqual([a for a in page.actions if a[0] == "click"], [("click", {"index": 2}), ("click", {"index": 4})])
 
     async def test_a_risky_step_that_failed_is_not_marked_done(self):
-        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        self.build([el(4, "Send", h=7, sh=8)], attended=False)
         pb = make_pb([S(1, "open", url="https://a.com/"), S(2, "click", target=fp("Missing", h=1), ask=True),
                       S(3, "approve", message="x"), S(4, "wait", seconds=1)], approve=True)
         r = await self.run_pb(pb)
@@ -677,12 +677,12 @@ class Checkpoints(PlayerCase):
 
     async def test_an_earlier_yes_grants_the_next_step_even_without_the_playbooks_own_approval(self):
         # attended, playbook never approved: the yes given to the checkpoint is what lets the send through
-        page = self.page(attended=True)
+        self.page(attended=True)
         r = await self.player.run(self.send_pb(approve=False), {"who": "Jane"}, approved={"s3"})
         self.assertEqual(r.status, "done", r.error)
         self.assertEqual(self.inner.asked, [])                                        # no second question
         self.assertEqual([s.approval for s in r.steps], [None, None, "asked", "preapproved"])
-        r2 = await self.player.run(self.send_pb(approve=False), {"who": "Jane"})      # without the answer it WOULD ask
+        await self.player.run(self.send_pb(approve=False), {"who": "Jane"})      # without the answer it WOULD ask
         self.assertEqual(self.inner.asked[0][0], "approve")
 
     async def test_a_yes_to_the_wrong_checkpoint_changes_nothing(self):
@@ -709,7 +709,7 @@ class Checkpoints(PlayerCase):
         self.assertEqual(r3.status, "done")
 
     async def test_secrets_are_never_shown_in_the_question(self):
-        page = self.build([el(1, "Password", "input", h=1)], attended=False)
+        self.build([el(1, "Password", "input", h=1)], attended=False)
         pb = make_pb([S(1, "open", url="https://a.com/login"),
                       S(2, "type", target=fp("Password", "input", h=1), text="<secret>pw</secret>"),
                       S(3, "approve", message="Log in?"), S(4, "wait", seconds=1)])
@@ -725,7 +725,7 @@ class Checkpoints(PlayerCase):
         self.assertEqual((await self.run_pb(pb)).waiting["detail"], "")
 
     async def test_a_checkpoint_in_a_playbook_run_without_a_driver_screenshot_still_parks(self):
-        page = self.build(attended=False)
+        self.build(attended=False)
         r = await self.run_pb(make_pb([S(1, "approve", message="Go?"), S(2, "wait", seconds=1)]))
         self.assertEqual((r.status, r.screenshot), ("waiting", None))
 
@@ -841,7 +841,7 @@ class InputsDuringTheRun(PlayerCase):
         self.assertEqual(r.status, "needs_you")
 
     async def test_with_nobody_there_it_parks_and_asks_for_the_value_later(self):
-        page = self.form_page(attended=False)
+        self.form_page(attended=False)
         r = await self.run_pb(self.code_pb(), {"who": "Jane"})
         self.assertEqual(r.status, "waiting")
         self.assertEqual(self.inner.texts, [])
@@ -973,7 +973,7 @@ class SkipWhenUnanswered(PlayerCase):
                         S(3, "click", target=fp("Send", h=7, sh=8), ask=True), S(4, "wait", seconds=1)], approve=True)
 
     async def test_the_question_says_what_happens_without_an_answer(self):
-        page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
+        self.build([el(4, "Send", h=7, sh=8)], attended=False)
         r = await self.run_pb(self.pb())
         self.assertEqual((r.waiting["on_timeout"], r.waiting["guarded"]), ("skip", "s3"))
 
@@ -1003,7 +1003,7 @@ class SkipWhenUnanswered(PlayerCase):
 
     async def test_only_the_named_step_is_skipped(self):
         page = self.build([el(4, "Send", h=7, sh=8)], attended=False)
-        r = await self.player.run(self.pb(), approved={"s2"}, skipped={"s99"})
+        await self.player.run(self.pb(), approved={"s2"}, skipped={"s99"})
         self.assertEqual([a for a in page.actions if a[0] == "click"], [("click", {"index": 4})])
 
 
@@ -1061,7 +1061,7 @@ class NewSteps(PlayerCase):
         self.assertEqual(page.actions, [])
 
     async def test_a_handoff_waits_for_the_user_and_carries_on(self):
-        page = self.build()
+        self.build()
         r = await self.run_pb(make_pb([S(1, "handoff", message="Solve the CAPTCHA"), S(2, "wait", seconds=1)]))
         self.assertEqual(r.status, "done", r.error)
         self.assertEqual(self.inner.asked, [("handoff", "Your turn")])
@@ -1213,7 +1213,7 @@ class OpenChecks(PlayerCase):
 
     async def test_ordinary_pages_that_merely_contain_login_words_are_not_stopped(self):
         for path in ("/session-info", "/sso-help", "/sessions", "/loginhelp", "/blog/login-tips", "/signing"):
-            page = self.build()
+            self.build()
             r = await self.run_pb(make_pb([S(1, "open", url="https://a.com" + path)]))
             self.assertEqual(r.status, "done", path)
         for path in ("/login", "/login/", "/uas/login?x=1", "/checkpoint/challenge", "/authwall?trk=1", "/signin"):
@@ -1222,7 +1222,7 @@ class OpenChecks(PlayerCase):
             self.assertEqual(r.status, "needs_you", path)
 
     async def test_a_login_playbook_may_open_a_login_page(self):
-        page = self.build([el(1, "Email", "input", h=1)])
+        self.build([el(1, "Email", "input", h=1)])
         pb = make_pb([S(1, "open", url="https://a.com/login"),
                       S(2, "type", target=fp("Email", "input", h=1), text="<secret>user</secret>")])
         r = await self.run_pb(pb)
@@ -1238,7 +1238,7 @@ class OpenChecks(PlayerCase):
         self.assertEqual(r.status, "failed")
 
     async def test_a_url_variable_may_land_on_any_of_its_allowed_sites(self):
-        page = self.build()
+        self.build()
         pb = make_pb([S(1, "open", url="{{u}}", check=Check(hosts=["a.com"]))],
                      variables=[Variable(name="u", type="url", allowed_hosts=["a.com", "b.com"])])
         r = await self.run_pb(pb, {"u": "https://b.com/page"})
@@ -1279,7 +1279,7 @@ class AiSteps(PlayerCase):
         self.assertEqual(len(r.outputs[0]["text"]), 20000)
 
     async def test_an_ai_step_is_not_guessed_at(self):
-        page = self.build()
+        self.build()
         r = await self.run_pb(make_pb([S(1, "ai", query="decide what to do"), S(2, "wait", seconds=1)]))
         self.assertEqual(r.status, "failed")
         self.assertIn("needs an AI", r.error)
@@ -1322,7 +1322,7 @@ class Robustness(PlayerCase):
         self.assertEqual(r.status, "done")
 
     async def test_the_summary_for_each_outcome(self):
-        page = self.build()
+        self.build()
         pb = make_pb([S(1, "wait", seconds=1), S(2, "ai", query="x")], name="My run")
         r = await self.run_pb(pb)
         self.assertIn('"My run" stopped after 1 of 2 steps', summarize(pb, r))

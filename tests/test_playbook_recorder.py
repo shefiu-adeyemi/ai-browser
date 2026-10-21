@@ -11,7 +11,7 @@ def el(name="button", ax=None, attrs=None, h=1, sh=None):
 
 
 def item(action, element=None, goal="", url="https://www.example.com/", error=None, tabs=None):
-    name = next(iter(action))
+    next(iter(action))
     return NS(
         model_output=NS(action=[action], current_state=NS(next_goal=goal)),
         result=[NS(error=error)],

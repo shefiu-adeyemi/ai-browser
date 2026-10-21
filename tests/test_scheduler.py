@@ -9,13 +9,13 @@ from pathlib import Path
 
 from aiba.playbooks import model as pbk
 from aiba.scheduling import schedules as sch
-from aiba.server.notifications import NotificationStore
 from aiba.playbooks.model import Check, Fingerprint, Playbook, Step, Variable
 from aiba.playbooks.store import PlaybookStore
 from aiba.scheduling.store import ScheduleStore
 from aiba.scheduling.schedules import Cadence, QuietHours, Schedule
 from aiba.scheduling.scheduler import Outcome, Scheduler
 from aiba.scheduling.limits import SiteLimits
+from aiba.scheduling.store import ScheduleNotFound
 
 T0 = datetime(2026, 10, 1, 9, 0, 0)              # a Thursday morning
 PROFILE = "https://www.linkedin.com/in/{}"
@@ -125,7 +125,7 @@ class Firing(Harness):
         self.assertEqual(len(self.calls), 1)
 
     async def test_disabled_and_paused_schedules_do_not_run(self):
-        a = self.add(next_run=sch.iso(T0), enabled=False)
+        self.add(next_run=sch.iso(T0), enabled=False)
         b = self.add(next_run=sch.iso(T0), name="paused")
         self.scheds.change_state(b.id, lambda st: st.model_copy(update={"paused_reason": "failed"}))
         await self.ticks(2)
@@ -195,8 +195,8 @@ class Rows(Harness):
         self.assertEqual(len(self.calls), 1)
 
     async def test_only_one_row_runs_per_tick_across_schedules_oldest_first(self):
-        a = self.add(name="A", next_run=sch.iso(T0))
-        b = self.add(name="B", next_run=sch.iso(T0))
+        self.add(name="A", next_run=sch.iso(T0))
+        self.add(name="B", next_run=sch.iso(T0))
         await self.sched.tick()
         self.assertEqual(len(self.calls), 1)
         await self.ticks(5, step=timedelta(seconds=120))
@@ -235,7 +235,7 @@ class Rows(Harness):
             await self.sched.tick()
 
     async def test_a_schedule_deleted_while_its_row_runs_is_not_brought_back(self):
-        s = self.add(next_run=sch.iso(T0))
+        self.add(next_run=sch.iso(T0))
         orig = self.sched._execute
 
         async def deleting(pb, values, sc, row, **extra):
@@ -306,7 +306,7 @@ class Failures(Harness):
         self.assertTrue(got.state.next_run)
         await self.ticks(2)
         self.assertEqual(len(self.calls), 1)                                 # not run again until it is due
-        with self.assertRaises(Exception):
+        with self.assertRaises(ScheduleNotFound):
             self.sched.resume("sch_" + "0" * 12)
 
 
@@ -372,7 +372,7 @@ class Pacing(Harness):
         self.assertEqual([c[2] for c in self.calls], [0])
 
     async def test_a_gap_is_kept_between_two_runs_on_the_same_site(self):
-        s = self.add(items=self.rows(2), next_run=sch.iso(T0))
+        self.add(items=self.rows(2), next_run=sch.iso(T0))
         await self.sched.tick()                                              # row 0 runs (3 s long)
         self.now += timedelta(seconds=10)                                    # only ~13 s since it started
         await self.sched.tick()
@@ -384,9 +384,9 @@ class Pacing(Harness):
 
     async def test_a_waiting_schedule_does_not_block_another_that_can_run(self):
         self.use_up_the_day()
-        profile = self.add(name="profiles", items=self.rows(1), next_run=sch.iso(T0))
+        self.add(name="profiles", items=self.rows(1), next_run=sch.iso(T0))
         other = self.save_pb(name="elsewhere", variables=[], steps=[Step(id="s1", kind="open", url="https://a.com/")])
-        free = self.add(name="free", playbook_id=other.id, items=[{}], next_run=sch.iso(T0))
+        self.add(name="free", playbook_id=other.id, items=[{}], next_run=sch.iso(T0))
         await self.sched.tick()
         self.assertEqual([c[0] for c in self.calls], ["elsewhere"])
 
@@ -946,7 +946,7 @@ class InputQuestions(CheckpointBase):
         self.assertEqual(len(self.calls), 1)
 
     async def test_silence_cancels_a_question_for_a_value(self):
-        s = await self.park_input()
+        await self.park_input()
         self.now += timedelta(hours=2)
         await self.sched.tick()
         self.assertEqual(self.resolved[0][1], "expired")
@@ -1005,7 +1005,7 @@ class InputQuestions(CheckpointBase):
         self.assertEqual(self.get(s).state.resume, [])
 
     async def test_a_skipped_run_that_is_too_stale_is_not_run(self):
-        s = await self.park_skippable()
+        await self.park_skippable()
         self.now += timedelta(hours=60)
         await self.sched.tick()
         await self.sched.tick()
@@ -1030,7 +1030,6 @@ class Loop(Harness):
 
     async def test_the_loop_survives_a_failing_tick_and_stops_when_cancelled(self):
         count = {"n": 0}
-        orig = self.sched.tick
 
         async def flaky():
             count["n"] += 1

@@ -9,6 +9,7 @@ from aiba.playbooks import draft as pd
 from aiba.playbooks import suggest as ps
 from aiba.playbooks.match import Candidate
 from test_playbook_player import PlayerCase, el
+from pydantic import ValidationError
 
 
 def S(kind, **kw):
@@ -68,13 +69,13 @@ class Cleaning(unittest.TestCase):
         self.assertEqual(len(notes), 2)
 
     def test_the_plan_schema_refuses_unknown_kinds_and_fields(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             pd.PlanStep(kind="run_javascript")
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValueError):
             pd.DraftPlan.model_validate({"steps": [{"kind": "wait", "script": "x"}]}) if False else pd.PlanStep.model_validate({"kind": "wait", "ask": True, "evil": 1}) and (_ for _ in ()).throw(ValueError())
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             pd.DraftPlan(steps=[S("wait")] * (pd.MAX_PLAN_STEPS + 1))
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             pd.PlanStep(kind="wait", seconds=9999)
 
 
@@ -216,7 +217,7 @@ class Walking(PlayerCase):
         self.assertEqual(out.model, "strong-model")
 
     async def test_the_walk_really_does_the_steps_it_can_verify(self):
-        out = await self.go(plan([S("open", url="https://shop.test/list"), S("search", engine="duckduckgo", query="red shoes")]))
+        await self.go(plan([S("open", url="https://shop.test/list"), S("search", engine="duckduckgo", query="red shoes")]))
         self.assertEqual([a[0] for a in self.page_obj.actions], ["navigate", "navigate"])
         self.assertIn("duckduckgo.com", self.page_obj.actions[1][1]["url"])
 

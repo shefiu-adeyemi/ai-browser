@@ -1,5 +1,6 @@
 """Tests for the 'auto' approval mode (agent running while you're away)."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio
@@ -11,7 +12,7 @@ from unittest import mock
 from browser_use.agent.views import ActionResult
 from browser_use.tools.service import Tools
 
-from aiba.agent.action_guard import GuardedTools, classify, site_named
+from aiba.agent.action_guard import GuardedTools, site_named
 
 SECRETS = {"linkedin_email", "linkedin_password"}
 LI = "https://www.linkedin.com/in/jane"

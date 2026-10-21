@@ -1,5 +1,6 @@
 """A stopped (or step-limited) run's report is what the next run is told, so "continue" picks up where it was."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
 import unittest

@@ -4,12 +4,12 @@ import json
 import random
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from aiba.playbooks import model as pbk
 from aiba.scheduling import limits as sl
-from aiba.playbooks.model import Check, Playbook, Step, Variable
+from aiba.playbooks.model import Playbook, Step, Variable
 
 NOW = datetime(2026, 10, 1, 12, 0, 0)
 VIEW = {"linkedin_profile_view": 1}
@@ -104,7 +104,7 @@ class Allowances(unittest.TestCase):
     def test_the_gap_is_random_within_its_range(self):
         lim = sl.SiteLimits(Path(self._tmp.name) / "r.json", rng=random.Random(1))
         waits = set()
-        for i in range(20):
+        for _ in range(20):
             lim.record(VIEW, NOW)
             waits.add((datetime.fromisoformat(lim._data["next_ok"]["linkedin"]) - NOW).total_seconds())
         self.assertGreater(len(waits), 5)
@@ -124,7 +124,7 @@ class Allowances(unittest.TestCase):
         self.assertTrue(self.lim.check({"nope": 5}, NOW).ok)
 
     def test_counts_survive_a_restart_and_old_days_are_dropped(self):
-        for i in range(3):
+        for _ in range(3):
             self.lim.record(VIEW, NOW)
         self.lim.record(VIEW, NOW - timedelta(days=60))
         again = sl.SiteLimits(self.path)

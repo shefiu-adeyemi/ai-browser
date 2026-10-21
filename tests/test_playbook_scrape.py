@@ -7,6 +7,7 @@ import unittest.mock
 from aiba.playbooks import model as pbk
 from aiba.playbooks.model import Playbook, ScrapeField, Step
 from aiba.playbooks import scrape as ps
+from pydantic import ValidationError
 def f(name, selector="td", type="text", attr=None):
     return {"name": name, "selector": selector, "type": type, "attr": attr}
 
@@ -210,11 +211,11 @@ class Format(unittest.TestCase):
         self.assertTrue(any("no 'row_selector'" in p for p in pbk.validate(bad)))
 
     def test_limits(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="scrape", max_rows=0)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="scrape", max_rows=501)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             Step(id="s1", kind="scrape", fields=[ScrapeField(name=f"f{i}", selector="td") for i in range(31)])
 
     def test_the_selectors_are_part_of_what_the_user_approves(self):

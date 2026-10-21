@@ -1,6 +1,7 @@
 """The drafting job through the app: starting it, polling it, stopping it, and what it is wired to."""
 
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import asyncio
@@ -10,7 +11,6 @@ from types import SimpleNamespace as NS
 from unittest import mock
 
 from aiba.server import main as agent_ui
-from aiba.playbooks import model as pbk
 from aiba.playbooks import draft as pd
 class Result:
     def __init__(self, tokens=120):

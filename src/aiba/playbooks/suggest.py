@@ -10,7 +10,6 @@ How it stays safe and cheap:
     dropped, and the user sees the resulting rows and decides whether to use them.
 """
 
-import json
 import re
 from typing import Any, Literal, Optional
 

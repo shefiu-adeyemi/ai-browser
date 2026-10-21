@@ -83,7 +83,7 @@ class Stop(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
                 seen["stop_requested"] = c.stop_requested
-                raise ValueError("Agent must have _task_start_time attribute")
+                raise ValueError("Agent must have _task_start_time attribute")  # noqa: B904 (replaces the cancellation, as browser-use's cleanup does)
         c.start(unwinds_badly, origin="a", fmt="auto")
         await asyncio.sleep(0)
         self.assertFalse(c.stop_requested)                   # not stopping yet

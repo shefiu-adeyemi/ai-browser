@@ -1,5 +1,6 @@
 """App-level tests for model tiers: the settings, the usage endpoint, and how the agent and playbooks use them."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())   # tests never touch real data
 
 import pathlib
@@ -175,7 +176,7 @@ class AgentSetup(Base):
 class Retry(Base):
     def agent(self, name="claude-sonnet-5-5"):
         a = NS(llm=Chat(name), registered=[])
-        a.token_cost_service = NS(register_llm=lambda l: a.registered.append(l))
+        a.token_cost_service = NS(register_llm=lambda llm: a.registered.append(llm))
         return a
 
     def test_a_retry_moves_to_the_strong_model(self):

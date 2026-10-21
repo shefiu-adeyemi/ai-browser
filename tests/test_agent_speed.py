@@ -1,5 +1,6 @@
 """Fast mode: how much the agent asks of the model each step. No browser, no model."""
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
 import pathlib

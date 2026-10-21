@@ -11,7 +11,6 @@ temp file and a rename, and a lock covers each read-modify-write. In addition:
   * the last HISTORY_KEEP versions are kept, so an edit that broke a playbook can be undone.
 """
 
-import json
 import logging
 import re
 import secrets

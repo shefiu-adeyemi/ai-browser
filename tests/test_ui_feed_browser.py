@@ -5,10 +5,10 @@ Why this exists: the feed's unit tests used hand-made log records, and browser-u
 to a short label while it formats a line ("Agent", "tools"...), so a filter written against the
 documented names matched nothing in the real app and the chat showed no progress at all.
 """
-import os as _os, tempfile as _tf
+import os as _os
+import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())
 
-import asyncio
 import http.server
 import logging
 import os
