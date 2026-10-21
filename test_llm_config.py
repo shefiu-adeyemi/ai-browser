@@ -25,7 +25,7 @@ def build(provider="", model="", **extra):
 
 class Clients(unittest.TestCase):
     def test_each_provider_builds_its_native_client_with_the_table_default(self):
-        expected = {"claude": "ChatAnthropic", "openai": "ChatOpenAI", "gemini": "ChatGoogle", "deepseek": "ChatDeepSeek", "qwen": "ChatOpenAI"}
+        expected = {"claude": "ChatAnthropic", "openai": "ChatOpenAI", "gemini": "ChatGoogle", "deepseek": "RepairingDeepSeek", "qwen": "ChatOpenAI"}
         for p in providers.PROVIDERS:
             llm = build(p.id)
             self.assertEqual(type(llm).__name__, expected[p.id], p.id)

@@ -124,8 +124,8 @@ def build_llm(provider_id: str, model: Optional[str] = None) -> BaseChatModel:
                           max_completion_tokens=MAX_OUTPUT_TOKENS, frequency_penalty=None)
 
     # deepseek
-    from browser_use.llm.deepseek.chat import ChatDeepSeek
-    return ChatDeepSeek(model=model, api_key=api_key, max_tokens=MAX_OUTPUT_TOKENS)
+    from deepseek_chat import RepairingDeepSeek      # DeepSeek's answers are put in the right shape before they are checked
+    return RepairingDeepSeek(model=model, api_key=api_key, max_tokens=MAX_OUTPUT_TOKENS)
 
 
 def get_llm() -> BaseChatModel:

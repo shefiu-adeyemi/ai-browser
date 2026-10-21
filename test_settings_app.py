@@ -49,7 +49,7 @@ class Clearing(SettingsCase):
 
     def test_a_cleared_key_is_really_not_used_any_more(self):
         self.post(LLM_PROVIDER="deepseek", DEEPSEEK_API_KEY="sk-deep1234567")
-        self.assertEqual(type(llm_config.get_llm()).__name__, "ChatDeepSeek")
+        self.assertEqual(type(llm_config.get_llm()).__name__, "RepairingDeepSeek")
         self.post(DEEPSEEK_API_KEY="")
         with self.assertRaises(llm_config.LLMConfigError):                                  # the stale value did not linger
             llm_config.get_llm()
