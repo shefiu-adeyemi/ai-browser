@@ -1,4 +1,4 @@
-"""Tests for remembered_answers.py: typed answers the user chose to keep for later runs."""
+"""Tests for storage/remembered_answers.py: typed answers the user chose to keep for later runs."""
 
 import os as _os
 import tempfile as _tf

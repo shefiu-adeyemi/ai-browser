@@ -1,4 +1,4 @@
-"""Tests for schedules.py: timing rules and what may be scheduled."""
+"""Tests for scheduling/schedules.py: timing rules and what may be scheduled."""
 
 import unittest
 from datetime import datetime

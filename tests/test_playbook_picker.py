@@ -1,4 +1,4 @@
-"""Tests for playbook_picker.py: what is accepted from the page (untrusted) and how the endpoints behave."""
+"""Tests for playbooks/picker.py: what is accepted from the page (untrusted) and how the endpoints behave."""
 
 import os as _os
 import tempfile as _tf

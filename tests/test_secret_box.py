@@ -1,4 +1,4 @@
-"""Tests for encrypting stored secrets (secret_box.py + its use in env_store.py)."""
+"""Tests for encrypting stored secrets (storage/secret_box.py + its use in storage/env.py)."""
 import os
 import pathlib
 import tempfile

@@ -1,4 +1,4 @@
-"""Tests for snapshots.py."""
+"""Tests for storage/snapshots.py."""
 
 import json
 import pathlib

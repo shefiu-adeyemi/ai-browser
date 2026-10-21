@@ -1,4 +1,4 @@
-"""Tests for watcher.py: what a run's comparison says."""
+"""Tests for scheduling/watcher.py: what a run's comparison says."""
 
 import pathlib
 import tempfile

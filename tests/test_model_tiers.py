@@ -1,4 +1,4 @@
-"""Tests for model_tiers.py: slots, the router table, escalation, and the usage ledger."""
+"""Tests for llm/tiers.py: slots, the router table, escalation, and the usage ledger."""
 
 import asyncio
 import json

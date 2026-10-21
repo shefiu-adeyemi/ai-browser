@@ -4,8 +4,21 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  tests:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  python-tests:
     # The app is Windows-first (DPAPI secrets, taskkill, PowerShell), so the tests run on Windows.
     runs-on: windows-latest
     steps:
@@ -17,13 +30,21 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
-            requirements-dev.txt
+            pyproject.toml
 
-      - name: Install Python packages
-        run: pip install -r requirements-dev.txt
+      - name: Install the package and its dev tools
+        run: pip install -e ".[dev]"
 
       - name: Python tests (fast suite; the real-browser tests are opt-in and do not run here)
-        run: python -m unittest
+        run: python -m unittest discover -s tests
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
@@ -31,18 +52,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install frontend packages
-        working-directory: frontend
-        run: npm ci
-
-      - name: Frontend tests
-        working-directory: frontend
+      - run: npm ci
+      - name: Tests
         run: npm test
-
-      - name: Frontend build (type-checks the code too)
-        working-directory: frontend
+      - name: Build (type-checks the code too)
         run: npm run build
-
-      - name: Dependency audit (frontend)
-        working-directory: frontend
+      - name: Dependency audit
         run: npm audit --audit-level=high

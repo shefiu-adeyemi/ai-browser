@@ -90,7 +90,7 @@ class ApprovalBroker:
 
 
 class ConsoleApprover:
-    """Terminal version for browser_agent.py / linkedin_agent.py."""
+    """Terminal version for cli/browser_agent.py / cli/linkedin_agent.py."""
 
     async def ask(self, kind: str, title: str, detail: str = "", url: str = "") -> bool:
         print(f"\n[Approval needed] {title}")

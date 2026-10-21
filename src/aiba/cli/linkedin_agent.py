@@ -5,10 +5,10 @@ so you only log in once. The web UI keeps a separate profile; the two can't shar
 Chromium locks a profile to a single running browser.
 
 Posting and sending are never automatic: every such click goes through the approval guard
-(action_guard.py), and "draft a post" stops before the Post button.
+(agent/action_guard.py), and "draft a post" stops before the Post button.
 
 Usage:
-  python linkedin_agent.py
+  python cli/linkedin_agent.py
 """
 
 import asyncio

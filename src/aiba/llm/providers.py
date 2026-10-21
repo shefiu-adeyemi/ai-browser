@@ -1,7 +1,7 @@
 """
 The single source of truth for which AI providers exist and what their defaults are.
 
-Before this, the same facts were written out separately in llm_config.py (defaults), .env.example
+Before this, the same facts were written out separately in llm/config.py (defaults), .env.example
 (a different DeepSeek default), and the React UI (a different provider name, "anthropic" where the
 server only knows "claude", plus its own model lists), so they had drifted apart. Everything now
 reads this table; the server sends it to the UI, and a test checks .env.example against it.

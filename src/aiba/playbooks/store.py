@@ -1,7 +1,7 @@
 """
 On-disk storage for playbooks (one JSON file each, plus a short version history for undo).
 
-Same rules as chat_store.py: ids are checked before they touch a path, every write goes through a
+Same rules as storage/chat_store.py: ids are checked before they touch a path, every write goes through a
 temp file and a rename, and a lock covers each read-modify-write. In addition:
 
   * a playbook is validated before it is stored, so a bad one never reaches disk;

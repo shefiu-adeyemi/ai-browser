@@ -1,4 +1,4 @@
-"""Tests for site_limits.py."""
+"""Tests for scheduling/limits.py."""
 
 import json
 import random

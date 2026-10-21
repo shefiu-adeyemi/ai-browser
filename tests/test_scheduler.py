@@ -1,4 +1,4 @@
-"""Tests for scheduler.py with real stores in a temp folder, a fake clock and a fake runner."""
+"""Tests for scheduling/scheduler.py with real stores in a temp folder, a fake clock and a fake runner."""
 
 import asyncio
 import random

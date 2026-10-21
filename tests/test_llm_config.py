@@ -27,7 +27,7 @@ class Clients(unittest.TestCase):
         for p in providers.PROVIDERS:
             llm = build(p.id)
             self.assertEqual(type(llm).__name__, expected[p.id], p.id)
-            self.assertEqual(llm.model, p.default_model, p.id)          # the default comes from providers.py
+            self.assertEqual(llm.model, p.default_model, p.id)          # the default comes from llm/providers.py
 
     def test_default_provider_is_claude_and_its_default_is_current(self):
         llm = build("")

@@ -1,4 +1,4 @@
-"""Tests for playbook_player.py with a fake page (no browser)."""
+"""Tests for playbooks/player.py with a fake page (no browser)."""
 
 from aiba.server.approvals import Typed
 import asyncio

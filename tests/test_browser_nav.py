@@ -1,4 +1,4 @@
-"""Tests for browser_nav.py (address rules, toolbar controller) and its HTTP endpoints. No browser."""
+"""Tests for agent/browser_nav.py (address rules, toolbar controller) and its HTTP endpoints. No browser."""
 import os as _os
 import tempfile as _tf
 _os.environ.setdefault("AIBA_DATA_DIR", _tf.mkdtemp())

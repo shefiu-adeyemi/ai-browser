@@ -1,7 +1,7 @@
 """
 Builds the AI model client for the provider chosen in Settings (LLM_PROVIDER / LLM_MODEL).
 
-Which providers exist, their default models and their key names all come from providers.py, so
+Which providers exist, their default models and their key names all come from llm/providers.py, so
 this file, the settings screen and .env.example cannot drift apart again.
 
   claude    Anthropic Claude   ANTHROPIC_API_KEY   browser-use ChatAnthropic
@@ -15,7 +15,7 @@ schema as a forced function call, which DeepSeek supports, so no workaround is n
 deliberately no patched fallback: if a live DeepSeek model misbehaves, fix the cause.
 
 `get_llm()` is the model for the Standard slot (LLM_PROVIDER / LLM_MODEL). `build_llm()` builds any
-provider/model pair, which is what the model tiers (model_tiers.py) use for Fast and Strong.
+provider/model pair, which is what the model tiers (llm/tiers.py) use for Fast and Strong.
 """
 
 import os

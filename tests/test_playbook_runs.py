@@ -1,4 +1,4 @@
-"""Tests for playbook_runs.py."""
+"""Tests for playbooks/runs.py."""
 
 import os
 import tempfile

@@ -1,4 +1,4 @@
-"""Tests for batch_check.py (the dry run), results_export.combined_table and their endpoints."""
+"""Tests for server/batch_check.py (the dry run), results_export.combined_table and their endpoints."""
 
 import os as _os
 import tempfile as _tf

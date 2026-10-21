@@ -41,10 +41,10 @@ REMEMBERED_ANSWERS_FILE = DATA_DIR / "remembered_answers.json"
 SNAPSHOTS_DIR       = DATA_DIR / "watch_snapshots"
 NOTIFICATIONS_FILE   = DATA_DIR / "notifications.json"
 UI_PROFILE_DIR       = DATA_DIR / "profiles" / "ui"          # browser used by the web UI
-LINKEDIN_PROFILE_DIR = DATA_DIR / "profiles" / "linkedin"    # browser used by linkedin_agent.py
+LINKEDIN_PROFILE_DIR = DATA_DIR / "profiles" / "linkedin"    # browser used by cli/linkedin_agent.py
 LAST_URL_FILE        = DATA_DIR / "last_url"
-LLM_USAGE_FILE       = DATA_DIR / "llm_usage.json"        # tokens used per tier and model (model_tiers.py)
-LLM_PRICES_FILE      = DATA_DIR / "llm_prices.json"       # what the user says each model costs, for estimates (model_tiers.py)
+LLM_USAGE_FILE       = DATA_DIR / "llm_usage.json"        # tokens used per tier and model (llm/tiers.py)
+LLM_PRICES_FILE      = DATA_DIR / "llm_prices.json"       # what the user says each model costs, for estimates (llm/tiers.py)
 
 # (old location inside the project, new location)
 _LEGACY = [

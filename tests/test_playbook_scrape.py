@@ -1,4 +1,4 @@
-"""Tests for playbook_scrape.py (cleaning, failure rules, how the page is asked) and the scrape step's format rules."""
+"""Tests for playbooks/scrape.py (cleaning, failure rules, how the page is asked) and the scrape step's format rules."""
 
 import json
 import unittest

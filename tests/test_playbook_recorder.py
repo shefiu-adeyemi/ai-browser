@@ -1,4 +1,4 @@
-"""Tests for playbook_recorder.py (history -> draft playbook), using look-alike history objects."""
+"""Tests for playbooks/recorder.py (history -> draft playbook), using look-alike history objects."""
 
 import unittest
 from types import SimpleNamespace as NS

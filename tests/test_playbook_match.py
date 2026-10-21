@@ -1,4 +1,4 @@
-"""Tests for playbook_match.py: finding a recorded element again."""
+"""Tests for playbooks/match.py: finding a recorded element again."""
 
 import unittest
 from types import SimpleNamespace as NS

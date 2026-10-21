@@ -1,4 +1,4 @@
-"""Tests for playbook_suggest.py (what the model sees, what it may answer, and how its answer is checked) and its endpoint."""
+"""Tests for playbooks/suggest.py (what the model sees, what it may answer, and how its answer is checked) and its endpoint."""
 
 import os as _os
 import tempfile as _tf

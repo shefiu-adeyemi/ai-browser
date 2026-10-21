@@ -1,7 +1,7 @@
 # Playbooks: design (approved; phases 1 to 4 built, see the status sections at the end)
 
 Full plan = this file (core: recording, approval policy, first playbook, build order) plus
-PLAYBOOKS_ROADMAP.md (scrape + batch, change monitoring + notifications, human checkpoints, natural
+playbooks-roadmap.md (scrape + batch, change monitoring + notifications, human checkpoints, natural
 language to playbook, and the format requirements for phase 1). Overall order: core, checkpoints,
 scrape + batch, monitoring + notifications, natural language to playbook.
 
@@ -93,8 +93,8 @@ Open risk: browser-use replay reliability on real sites is untested; prototype b
 
 
 ## Phase 1 status (built and tested)
-Built: the playbook format (`playbook.py`), storage with version history/undo (`playbook_store.py`), the
-recorder that turns a finished AI run into a draft (`playbook_recorder.py`), the API (`/playbooks`,
+Built: the playbook format (`src/aiba/playbooks/model.py`), storage with version history/undo (`src/aiba/playbooks/store.py`), the
+recorder that turns a finished AI run into a draft (`src/aiba/playbooks/recorder.py`), the API (`/playbooks`,
 `/playbooks/draft`, `/playbooks/variable`, `/playbooks/{id}`, `/playbooks/{id}/restore`) and the
 Playbooks dialog in the UI (save the last run: review steps with AI/no-AI badges, make inputs, approve,
 save; library with delete). Tests: `test_playbook*.py`, plus the opt-in real-browser
@@ -116,9 +116,9 @@ hand-offs were not recorded.
 
 
 ## Phase 2 status (built and tested)
-Built: the element matcher (`playbook_match.py`), the player (`playbook_player.py`), run records
-(`playbook_runs.py`), the run endpoints (`POST /playbooks/{id}/run`, `GET /playbooks/{id}/runs[/{run}]`),
-`run_playbook_task` in `agent_ui.py` and the Run form in the Playbooks dialog. A run happens in the
+Built: the element matcher (`src/aiba/playbooks/match.py`), the player (`src/aiba/playbooks/player.py`), run records
+(`src/aiba/playbooks/runs.py`), the run endpoints (`POST /playbooks/{id}/run`, `GET /playbooks/{id}/runs[/{run}]`),
+`run_playbook_task` in `src/aiba/server/main.py` and the Run form in the Playbooks dialog. A run happens in the
 current chat through the same TaskController, GuardedTools, approval prompts and live view as an AI run,
 and is recorded step by step. Tests: `test_playbook_match.py`, `test_playbook_player.py` (fake page),
 `test_playbook_runs.py`, `test_playbook_runs_app.py`, and the opt-in real-browser
@@ -172,9 +172,9 @@ against real LinkedIn (needs a signed-in account and respects its terms); tab po
 
 
 ## Phase 3 status: scheduler (built and tested)
-Built: schedules (`schedules.py`, `schedule_store.py`), the scheduler (`scheduler.py`), daily allowances and
-gaps (`site_limits.py`), the inbox and desktop toasts (`notifications.py`), the unattended runner and API in
-`agent_ui.py` (`/schedules*`, `/scheduler/limits`, `/notifications*`), and the UI (Schedules tab with a
+Built: schedules (`src/aiba/scheduling/schedules.py`, `src/aiba/scheduling/store.py`), the scheduler (`src/aiba/scheduling/scheduler.py`), daily allowances and
+gaps (`src/aiba/scheduling/limits.py`), the inbox and desktop toasts (`src/aiba/server/notifications.py`), the unattended runner and API in
+`src/aiba/server/main.py` (`/schedules*`, `/scheduler/limits`, `/notifications*`), and the UI (Schedules tab with a
 create/edit form and the limits editor, a bell with an unread count, the inbox). Tests: `test_schedules.py`,
 `test_site_limits.py`, `test_notifications.py`, `test_schedule_store.py`, `test_scheduler.py`,
 `test_schedules_app.py`, and the opt-in real-browser `test_scheduler_browser.py`.

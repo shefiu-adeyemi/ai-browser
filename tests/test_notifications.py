@@ -1,4 +1,4 @@
-"""Tests for notifications.py."""
+"""Tests for server/notifications.py."""
 
 import tempfile
 import threading

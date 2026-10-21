@@ -1,6 +1,6 @@
 # Playbooks roadmap: features 2 to 5 (plan, not built)
 
-Feature 1 (playbook core: record, variables, deterministic player, scheduler) is in PLAYBOOKS.md.
+Feature 1 (playbook core: record, variables, deterministic player, scheduler) is in playbooks.md.
 Features below build on it. Everything keeps the same guard, approval and secret rules.
 
 ## What the format must allow from day one
@@ -122,7 +122,7 @@ step or a domain; review screen lists every `ask` action.
 ---
 
 ## Order and dependencies
-1. Core (PLAYBOOKS.md) with the format above.
+1. Core (playbooks.md) with the format above.
 2. Feature 4 (checkpoints) early, because the scheduler needs "Waiting for you" and notifications need it.
 3. Feature 2 (extract + batch) on the core player.
 4. Feature 3 (change monitoring + notifications) on the scheduler and extract.
@@ -145,7 +145,7 @@ poor onboarding. (Research from review sites and vendor blogs; treat as directio
    this person"); an unattended run may do exactly that and nothing else. This closes the known gap where
    scheduled jobs stall because a final confirmation can't be given.
 9. **Per-site safety profiles.** Per-action caps, random delays and a warm-up ramp (LinkedIn values in
-   PLAYBOOKS.md), editable, with a plain-language terms-of-service warning.
+   playbooks.md), editable, with a plain-language terms-of-service warning.
 10. **Templates + guided first playbook.** Ready-made playbooks and plain-language error messages.
 11. **Session-health inbox.** Before a scheduled run, check the signed-in state and surface "needs sign-in".
 12. **Versioning and undo** for playbooks (restore an earlier version after an edit breaks it); all steps and
@@ -160,7 +160,7 @@ Build-order placement: 6, 7, 11, 12 join the core/player/scheduler phases (they 
 ## Model tiers and router (approved; lessons from Cursor research)
 
 Settings gain three model slots, each a (provider, model) pair picked from the existing provider list
-(`providers.py` stays the single source of truth):
+(`src/aiba/llm/providers.py` stays the single source of truth):
 - **Fast** (low latency, cheap): self-heal element lookups, `extract` steps (`page_extraction_llm`), simple
   classification, diff summaries, checkpoint text.
 - **Standard** (default): normal chat tasks and AI steps inside playbooks.
@@ -203,7 +203,7 @@ format above) starts next, after the user's go-ahead.
 
 
 ## Model tiers: built (status)
-`model_tiers.py` plus a "Model tiers" section in Settings. Three slots: Fast, Standard (the existing provider/model
+`src/aiba/llm/tiers.py` plus a "Model tiers" section in Settings. Three slots: Fast, Standard (the existing provider/model
 setting), Strong. A fixed table gives each job its first tier (reading a page and shortening history: Fast; the
 agent's own steps and the reviewer: Standard; a retry after an incomplete attempt and drafting: Strong). A slot that
 is unset, or whose provider has no API key, uses the Standard model; the router can be switched off

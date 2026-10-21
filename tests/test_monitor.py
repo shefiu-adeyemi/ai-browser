@@ -1,4 +1,4 @@
-"""Tests for monitor.py: the settings, the comparison and how a change is reported."""
+"""Tests for scheduling/monitor.py: the settings, the comparison and how a change is reported."""
 
 import unittest
 

@@ -3,7 +3,7 @@ Pacing for sites that restrict accounts which act like a robot (LinkedIn, so far
 
 Published safe ranges for an established account are roughly 150-300 profile views, 15-25 connection
 requests and 40-80 messages a day, lower for a new account, with human-looking gaps between actions
-(PLAYBOOKS.md, "LinkedIn limits"). So an unattended run is counted against a daily allowance per kind
+(docs/playbooks.md, "LinkedIn limits"). So an unattended run is counted against a daily allowance per kind
 of activity, the allowance starts low and ramps up week by week from the first day it is used, and two
 runs on the same site are always a random while apart.
 

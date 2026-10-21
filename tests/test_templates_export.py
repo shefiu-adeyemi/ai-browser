@@ -1,4 +1,4 @@
-"""Tests for playbook_templates.py and results_export.py."""
+"""Tests for playbooks/templates.py and server/results_export.py."""
 
 import csv
 import json

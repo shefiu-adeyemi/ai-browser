@@ -2,11 +2,11 @@
 Schedules: when a playbook runs by itself, with which inputs, and what happens when something goes wrong.
 
 Pure data and rules (no files, no browser, no clock of its own): every function takes the time it should
-use, so everything here is unit-tested with made-up times. The rules come from PLAYBOOKS.md ("Approval
+use, so everything here is unit-tested with made-up times. The rules come from docs/playbooks.md ("Approval
 policy"): an unattended run may only do what the user approved in advance, so a schedule can only be
 created for an APPROVED playbook, whose inputs all validate, and which has no step that needs a person or
 an AI to decide. Whenever the playbook is edited later its approval goes, and the scheduler refuses to
-run it (see scheduler.py), so a schedule can never outlive what the user agreed to.
+run it (see scheduling/scheduler.py), so a schedule can never outlive what the user agreed to.
 
 Times are the computer's local wall-clock times (naive datetimes): "every day at 09:00" means 09:00 where
 the user is. ISO strings are used on disk.
@@ -133,7 +133,7 @@ class Schedule(BaseModel):
     items: list[dict[str, str]] = Field(default_factory=lambda: [{}], max_length=MAX_ITEMS)   # one run per row
     on_failure: Literal["stop", "skip"] = "stop"             # when a row needs the user: stop, or skip to the next
     # Sends, posts and other steps that reach other people are OFF for unattended runs unless the user says
-    # so here, on top of approving the playbook (PLAYBOOKS.md: "off by default").
+    # so here, on top of approving the playbook (docs/playbooks.md: "off by default").
     allow_sensitive: bool = False
     watch: Watch = Field(default_factory=Watch)               # tell me only when what it reads changes
     created_at: str = ""

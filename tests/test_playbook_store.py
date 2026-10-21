@@ -1,4 +1,4 @@
-"""Tests for playbook_store.py."""
+"""Tests for playbooks/store.py."""
 
 import json
 import tempfile

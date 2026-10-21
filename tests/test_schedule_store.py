@@ -1,4 +1,4 @@
-"""Tests for schedule_store.py."""
+"""Tests for scheduling/store.py."""
 
 import json
 import tempfile

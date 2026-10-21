@@ -1,7 +1,7 @@
 """
 On-disk storage for chat sessions.
 
-Replaces loose helper functions in agent_ui.py that had these problems:
+Replaces loose helper functions in server/main.py that had these problems:
   * the session id came straight from the URL and was pasted into a file path, so a crafted id
     (``..\\something``) could delete or read files outside the sessions folder;
   * ids were a timestamp chopped to 20 characters, so two chats created in the same fraction of

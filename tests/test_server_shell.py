@@ -1,4 +1,4 @@
-"""Tests for agent_ui.py's shell: broadcast fan-out, log feed, lifespan, and the 'UI not built' page."""
+"""Tests for server/main.py's shell: broadcast fan-out, log feed, lifespan, and the 'UI not built' page."""
 import asyncio
 import logging
 import os

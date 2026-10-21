@@ -1,6 +1,6 @@
 """
 AI Browser Agent UI
-Run:  python agent_ui.py
+Run:  python server/main.py
 Open: http://localhost:8000
 """
 
@@ -62,7 +62,7 @@ from aiba.agent.browser_nav import BadAddress, Navigator, Busy as NavBusy
 from aiba.server.ui_feed import UIFeed
 from aiba.storage.credentials import linkedin_sensitive_data, linkedin_login_instructions
 
-# Secrets and browser profiles live outside the project folder (see app_paths.py).
+# Secrets and browser profiles live outside the project folder (see storage/paths.py).
 # Old copies are moved there by app_paths.migrate_legacy() when the server is launched
 # (see __main__ below) - never as a side effect of importing this module.
 ENV_PATH       = app_paths.ENV_PATH
@@ -77,7 +77,7 @@ def _read_env() -> dict:
     return env_store.read(ENV_PATH)
 
 def _write_env(updates: dict) -> None:
-    """Apply validated settings: a value sets the key, None/"" REMOVES it (see env_store.py).
+    """Apply validated settings: a value sets the key, None/"" REMOVES it (see storage/env.py).
     The running process is updated too, so a change (or a cleared secret) takes effect at once."""
     env_store.write(ENV_PATH, updates)
     for key, value in updates.items():
@@ -89,7 +89,7 @@ def _write_env(updates: dict) -> None:
 # Global state
 # ---------------------------------------------------------------------------
 _session: BrowserSession | None = None
-_ctl = TaskController()          # owns running / paused / the run's task handle (task_control.py)
+_ctl = TaskController()          # owns running / paused / the run's task handle (server/task_control.py)
 _clients: Set[WebSocket] = set()
 _conversation_history: list[dict] = []  # [{role, content, ts}]
 _current_session_id: str = ""
@@ -100,7 +100,7 @@ _last_run: dict | None = None
 # ---------------------------------------------------------------------------
 # Session management
 # ---------------------------------------------------------------------------
-_store = ChatStore(SESSIONS_DIR)     # all chat persistence lives in chat_store.py
+_store = ChatStore(SESSIONS_DIR)     # all chat persistence lives in storage/chat_store.py
 
 
 def _sessions_index() -> list[dict]:
@@ -143,7 +143,7 @@ _init_sessions()
 # ---------------------------------------------------------------------------
 # Log capture
 # ---------------------------------------------------------------------------
-_ui_feed = UIFeed()     # allowlist + secret redaction + line cap (see ui_feed.py)
+_ui_feed = UIFeed()     # allowlist + secret redaction + line cap (see server/ui_feed.py)
 
 
 _background_tasks: set[asyncio.Task] = set()
@@ -320,7 +320,7 @@ def _wrap_task(task: str, fmt: str, context: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Task wording + single-task runner
 # (The old self-critique lived here; it never worked and is replaced by browser-use's own
-#  judge, read through run_outcome.py.)
+#  judge, read through agent/run_outcome.py.)
 # ---------------------------------------------------------------------------
 def _login_page_instructions(task: str) -> str:
     """Login handling for the task prompt. LinkedIn credentials are only mentioned when
@@ -370,7 +370,7 @@ def _judge_enabled(provider: str, vision: bool = True) -> bool:
     return os.getenv("USE_JUDGE", "1").strip().lower() not in ("0", "off", "false", "no")
 
 
-_ledger = model_tiers.Ledger(app_paths.LLM_USAGE_FILE)      # tokens per tier and model, see model_tiers.py
+_ledger = model_tiers.Ledger(app_paths.LLM_USAGE_FILE)      # tokens per tier and model, see llm/tiers.py
 _router = model_tiers.Router(ledger=_ledger)
 _prices = model_tiers.Prices(app_paths.LLM_PRICES_FILE)     # entered by the user; the app ships none
 
@@ -469,7 +469,7 @@ def _new_agent(task_text: str, task: str, llm, session: BrowserSession,
         except Exception:
             _log.exception("could not set up the reviewer on the Standard model; it uses the task's own model")
     # Every action passes through GuardedTools: credentials only into login fields,
-    # risky/irreversible actions need a click on the approval prompt (see action_guard.py).
+    # risky/irreversible actions need a click on the approval prompt (see agent/action_guard.py).
     tools = GuardedTools(
         _broker,
         secret_names={k for v in (sensitive_data or {}).values() for k in v},
@@ -656,7 +656,7 @@ def _remember_run(task: str, agent: Agent) -> None:
 
 async def run_task(task: str, fmt: str = "auto", max_steps: int = 0, resume: bool = False,
                    tier: str | None = None) -> None:
-    """One agent run. Started/stopped only through _ctl (see task_control.py), which owns the
+    """One agent run. Started/stopped only through _ctl (see server/task_control.py), which owns the
     running/paused flags, so this function never sets them and never touches the browser's
     lifetime."""
     global _paused_agent, _last_run, _active_agent
@@ -1337,7 +1337,7 @@ async def delete_session(sid: str):
 
 
 # ---------------------------------------------------------------------------
-# Playbooks (see PLAYBOOKS.md)
+# Playbooks (see docs/playbooks.md)
 # ---------------------------------------------------------------------------
 _playbooks = PlaybookStore(app_paths.PLAYBOOKS_DIR)
 _remembered = RememberedAnswers(app_paths.REMEMBERED_ANSWERS_FILE)
@@ -1419,7 +1419,7 @@ def _save_run_record(pb: pbk.Playbook, record: dict, status: str, error: str, re
 async def run_playbook_task(pb: pbk.Playbook, values: dict, run_id: str) -> None:
     """Replay a playbook in the shared browser, in the current chat. Started and stopped only through
     _ctl, like an AI run, so Stop, the live view and the approval prompts all work the same way.
-    Every action goes through GuardedTools (see playbook_player.py): a playbook step is no less safe
+    Every action goes through GuardedTools (see playbooks/player.py): a playbook step is no less safe
     than an AI step."""
     global _last_run
     _last_run = None
@@ -1561,7 +1561,7 @@ async def draft_playbook():
     return {"ok": True, **draft.to_dict()}
 
 
-# --- Drafting a playbook from a description (playbook_draft.py): runs in the shared browser, so Stop and the live view work ---
+# --- Drafting a playbook from a description (playbooks/draft.py): runs in the shared browser, so Stop and the live view work ---
 _drafts: dict[str, dict] = {}
 MAX_DRAFT_JOBS = 5
 
@@ -1992,7 +1992,7 @@ async def restore_playbook(pid: str, body: dict):
 
 
 # ---------------------------------------------------------------------------
-# Schedules (see schedules.py, scheduler.py): playbooks that run by themselves
+# Schedules (see scheduling/schedules.py, scheduling/scheduler.py): playbooks that run by themselves
 # ---------------------------------------------------------------------------
 _schedules = ScheduleStore(app_paths.SCHEDULES_FILE)
 _limits = SiteLimits(app_paths.SITE_LIMITS_FILE)

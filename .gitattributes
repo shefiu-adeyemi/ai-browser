@@ -5,3 +5,7 @@
 *.ico binary
 *.png binary
 *.exe binary
+
+# Windows scripts must keep CRLF line endings.
+*.bat text eol=crlf
+*.vbs text eol=crlf

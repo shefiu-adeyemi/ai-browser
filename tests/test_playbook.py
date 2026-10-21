@@ -1,4 +1,4 @@
-"""Tests for the playbook format (playbook.py): validation, domains, approval, variables."""
+"""Tests for the playbook format (playbooks/model.py): validation, domains, approval, variables."""
 
 import unittest
 

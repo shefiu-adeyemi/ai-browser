@@ -1,4 +1,4 @@
-"""Tests for ui_feed.py: what reaches the chat from the log stream, and that secrets never do."""
+"""Tests for server/ui_feed.py: what reaches the chat from the log stream, and that secrets never do."""
 import logging
 import unittest
 

@@ -1,4 +1,4 @@
-"""Tests for playbook_draft.py: the plan the model may write, how elements are found by words, and the walk that tries it."""
+"""Tests for playbooks/draft.py: the plan the model may write, how elements are found by words, and the walk that tries it."""
 
 import json
 import unittest

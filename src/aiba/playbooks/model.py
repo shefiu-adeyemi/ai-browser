@@ -8,7 +8,7 @@ directly. It answers four questions:
   * Is this one safe to store?   -> validate(): every problem is listed, not just the first.
   * What may it touch?           -> compute_domains(): the sites a run is allowed to visit.
   * Has the user approved THIS?  -> approval_hash(): the approval is tied to the exact steps,
-    so editing any step silently drops it (see PLAYBOOKS.md, "Approval policy").
+    so editing any step silently drops it (see docs/playbooks.md, "Approval policy").
 
 Values typed into a playbook run (variables) are checked against their declared type before
 they are substituted, so a "LinkedIn profile URL" variable can never carry another site.

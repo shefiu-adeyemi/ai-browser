@@ -5,7 +5,7 @@ It decides; it does not run browsers. Running a playbook with nobody there is ha
 (agent_ui wires it to the same player and guard as a manual run, with attended=False), so this file is
 tested with a fake page and a fake clock.
 
-The policy it enforces (PLAYBOOKS.md, "Approval policy" and "Failure behaviour"):
+The policy it enforces (docs/playbooks.md, "Approval policy" and "Failure behaviour"):
 
   * Schedules only fire while the app is open. A run that was due more than GRACE ago (the app was closed,
     the computer asleep) is SKIPPED and recorded as missed, never run late.
@@ -14,7 +14,7 @@ The policy it enforces (PLAYBOOKS.md, "Approval policy" and "Failure behaviour")
     schedule is paused with the reason and the user is told.
   * One run at a time, and never while the user's own task is running: due work waits its turn.
   * Pacing: daily allowances per kind of activity (ramping up from a low start) and a random gap between
-    runs on the same site (site_limits.py). A day's allowance used up means the rest waits for tomorrow.
+    runs on the same site (scheduling/limits.py). A day's allowance used up means the rest waits for tomorrow.
   * When a row stops because it needs the user (a sign-in wall, an approval nobody can give) or fails, the
     schedule's own choice applies: STOP (pause the schedule, tell the user) or SKIP (tell the user, carry on
     with the next row). The user pressing Stop cancels the batch without pausing anything.

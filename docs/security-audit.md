@@ -1,4 +1,9 @@
-# AI Browser Agent — Audit Findings (56)
+# AI Browser Agent — Audit Findings (69)
+
+> **Historical record.** This is the audit that drove the project's hardening. File names and line numbers refer to the
+> code as it was when each item was found, before the move to `src/aiba/` (for example `agent_ui.py` is now
+> `src/aiba/server/main.py`). As of the first public release 68 items are fixed, 3 are partly addressed (the reasoning is kept with each), and 3 are
+> open because they need live checks with paid API keys or a real desktop session (P1, P2, P5).
 
 Status legend: `[ ]` open · `[~]` partly addressed · `[x]` fixed
 

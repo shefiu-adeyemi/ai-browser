@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,31 @@ version = "0.1.0"
 description = "Give an AI a real browser, with a safety layer, a live view and replayable playbooks."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Shefiu Adeyemi" }]
+keywords = ["browser-automation", "ai-agent", "llm", "browser-use", "playwright", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Testing",
+]
+# The runtime dependencies (and why each is there) are documented in requirements.txt, the single list.
 dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "pyinstaller>=6.0",   # builds the Windows launcher .exe
+    "httpx>=0.28",        # the test client behind the HTTP tests
+]
+
+[project.urls]
+Homepage = "https://github.com/shefiu-adeyemi/ai-browser"
+Issues = "https://github.com/shefiu-adeyemi/ai-browser/issues"
 
 [project.scripts]
 aiba = "aiba.server.main:main"

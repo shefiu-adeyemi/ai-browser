@@ -1,14 +1,8 @@
-# Extra tools for developing and packaging (not needed to just run the app).
-#   pip install -r requirements-dev.txt
--r requirements.txt
-
-# Builds "AI Browser Agent.exe" from launcher.py (see build_exe.bat).
-pyinstaller>=6.0
-
-# The test client behind the HTTP tests. browser-use already installs it; listed so the test
-# suite does not silently depend on that.
-httpx>=0.28
+# Tools for developing and packaging (not needed to just run the app).
+#   pip install -r requirements-dev.txt      (same as: pip install -e ".[dev]")
+-e .[dev]
 
 # Also needed to build the web UI: Node.js 22+, then:  cd frontend && npm install && npm run build
-# Tests:  python -m unittest          (fast)
-#         RUN_BROWSER_TESTS=1 python -m unittest   (launches a real Chromium; slow)
+# Tests:  python -m unittest discover -s tests          (fast)
+#         RUN_BROWSER_TESTS=1 python -m unittest discover -s tests   (launches a real Chromium; slow)
+# Lint:   ruff check .

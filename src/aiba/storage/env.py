@@ -73,7 +73,7 @@ def parse(text: str) -> dict[str, str]:
     return out
 
 
-# Stored encrypted (Windows DPAPI, see secret_box.py). The email and the other settings are not secret.
+# Stored encrypted (Windows DPAPI, see storage/secret_box.py). The email and the other settings are not secret.
 SECRET_KEYS = tuple(p.key_env for p in providers.PROVIDERS) + ("LINKEDIN_PASSWORD",)
 
 

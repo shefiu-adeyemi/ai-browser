@@ -4,7 +4,7 @@ Gives the AI a real Chromium browser to control with natural language tasks.
 
 Setup:
   cp .env.example .env   # fill in ANTHROPIC_API_KEY (or whichever provider key)
-  python browser_agent.py
+  python cli/browser_agent.py
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from browser_use.browser.session import BrowserSession
 from aiba.llm.config import get_llm
 
 
-# General browsing only. LinkedIn needs a login and has its own menu: use linkedin_agent.py.
+# General browsing only. LinkedIn needs a login and has its own menu: use cli/linkedin_agent.py.
 TASKS = {
     "wikipedia": (
         "Open https://en.wikipedia.org/wiki/Web_browser and summarise the first section "

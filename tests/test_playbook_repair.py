@@ -1,4 +1,4 @@
-"""Tests for playbook_repair.py: what a model may be shown and answer, and what a repair is allowed to change."""
+"""Tests for playbooks/repair.py: what a model may be shown and answer, and what a repair is allowed to change."""
 
 import asyncio
 import json
