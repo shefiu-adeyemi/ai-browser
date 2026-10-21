@@ -1,19 +1,45 @@
-# Secrets and private data - never commit
+# ── Secrets and private data: never commit ────────────────────────────────────
+# The app keeps keys, browser profiles and chats in %LOCALAPPDATA%\AIBrowserAgent, outside this
+# folder. These patterns are a second line of defence for anything that ends up here by accident.
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 browser_profile/
 .browser_profile/
+profiles/
 sessions/
+playbook_runs/
+watch_snapshots/
 task_history.json
 .last_url
 *.log
+*.log.*
+*.old
+*.bak
 
-# Build output and dependencies
+# ── Python ───────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ── Build output and dependencies ─────────────────────────────────────────────
 build/
 dist/
+*.exe
 frontend/node_modules/
 frontend/dist/
-__pycache__/
-*.pyc
-*.exe
+
+# ── Editors and OS ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

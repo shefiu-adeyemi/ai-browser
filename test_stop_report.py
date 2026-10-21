@@ -8,7 +8,7 @@ from unittest import mock
 
 import agent_ui
 
-LONG = "Nnebuogo Egboh, Founder of Africa Market Systems & Policy Advisory, trade policy and market systems advisory. " * 2
+LONG = "Ngozi Sample, Founder of Example Market Systems & Policy Advisory, trade policy and market systems advisory. " * 2
 
 
 def agent(steps=7, notes=None, extracted=()):
@@ -23,11 +23,11 @@ class Report(unittest.TestCase):
         out = agent_ui._progress_report(text)
         self.assertTrue(out.startswith("Stopped after 7 steps. Here is what it had found so far:"))
         self.assertIn("1. Abdoulie", out)
-        self.assertNotIn("Nnebuogo", out)
+        self.assertNotIn("Ngozi", out)
 
     def test_without_notes_it_uses_the_longest_things_it_read(self):
         out = agent_ui._progress_report(agent(extracted=["Navigated to x", LONG, "ok", LONG + " second"]))
-        self.assertIn("Nnebuogo", out)
+        self.assertIn("Ngozi", out)
         self.assertNotIn("Navigated to x", out)                           # a one-line action result is not a finding
 
     def test_nothing_found_means_no_report(self):

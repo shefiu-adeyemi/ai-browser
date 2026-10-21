@@ -14,11 +14,11 @@ def hist(*turns):
 
 class FeedsTheNextRun(unittest.TestCase):
     def test_the_whole_report_reaches_the_next_run_not_just_the_first_lines(self):
-        report = "Stopped after 12 steps. " + "Lead: Abdoulie Kurang, Karantaa. " * 40
+        report = "Stopped after 12 steps. " + "Lead: Ada Example, Example Labs. " * 40
         ctx = agent_ui._build_context_prefix(hist(("user", "find 25 leads", None), ("agent", report, "progress")))
         self.assertIn("Progress so far", ctx)
         self.assertIn("carry on from here", ctx)
-        self.assertGreater(ctx.count("Abdoulie Kurang"), 20)                  # not cut to 350 characters
+        self.assertGreater(ctx.count("Ada Example"), 20)                  # not cut to 350 characters
 
     def test_an_ordinary_answer_is_still_cut_short(self):
         ctx = agent_ui._build_context_prefix(hist(("user", "q", None), ("agent", "x " * 800, None)))
