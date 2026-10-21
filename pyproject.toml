@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-browser-agent"
+version = "0.1.0"
+description = "Give an AI a real browser, with a safety layer, a live view and replayable playbooks."
+readme = "README.md"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[project.scripts]
+aiba = "aiba.server.main:main"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+where = ["src"]
