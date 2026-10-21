@@ -27,6 +27,14 @@ item-by-item audit are in [docs/security-audit.md](docs/security-audit.md). Thre
 - The guard gates *actions*, not *what the model reads*: an injected page can still steer what the agent
   summarises. That limit is documented in the audit (#62).
 
+## Dependency advisories
+
+CI audits the frontend's runtime dependencies (what ships in the built app) and fails on any high-severity advisory.
+It also reports advisories in build-time tools without failing, so they stay visible. At the time of writing the
+only open one is `braces` (a denial-of-service through deeply nested glob patterns), reached through Tailwind CSS 3's
+build chain. It runs only while building, on this repository's own source, and never reaches the built app; the fix
+is the move to Tailwind 4, which is a breaking change and is planned separately.
+
 ## Supported versions
 
 Only the latest release on the default branch is supported.
