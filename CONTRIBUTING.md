@@ -17,7 +17,7 @@ Needs Python 3.12 and Node.js 22+.
 ```bash
 ruff check .                                   # lint
 python -m unittest discover -s tests           # fast tests, no browser, no API keys
-cd frontend && npm test && npm run build       # if you touched the UI
+cd frontend && npm test && npm run typecheck && npm run build   # if you touched the UI
 ```
 
 The real-browser tests are opt-in because they launch Chromium (`RUN_BROWSER_TESTS=1 python -m unittest discover -s tests`).

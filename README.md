@@ -81,7 +81,7 @@ scripted stand-in that lets the **real browser-use agent run end to end against 
 |---|---|
 | Python, fast (no browser) | `python -m unittest discover -s tests` |
 | Python, with a real Chromium (slower) | `RUN_BROWSER_TESTS=1 python -m unittest discover -s tests` |
-| Frontend | `cd frontend && npm test` |
+| Frontend tests, type-check, build | `cd frontend && npm test`, `npm run typecheck`, `npm run build` |
 | Lint | `ruff check .` |
 
 That is about 1,700 fast Python tests, about 110 real-browser tests and 184 frontend tests. CI
